@@ -11,6 +11,32 @@ use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
 use crate::layout::PaneInfo;
+use crate::pane::PaneRuntime;
+
+fn stable_scrollbar_gutter(rt: &PaneRuntime, pane_inner: Rect) -> (Rect, Option<Rect>) {
+    if pane_inner.width <= 4 {
+        return (pane_inner, None);
+    }
+
+    let inner_rect = Rect::new(
+        pane_inner.x,
+        pane_inner.y,
+        pane_inner.width.saturating_sub(1),
+        pane_inner.height,
+    );
+    let gutter = Rect::new(
+        pane_inner.x + pane_inner.width.saturating_sub(1),
+        pane_inner.y,
+        1,
+        pane_inner.height,
+    );
+    let scrollbar_rect = rt
+        .scroll_metrics()
+        .filter(|metrics| should_show_scrollbar(*metrics))
+        .map(|_| gutter);
+
+    (inner_rect, scrollbar_rect)
+}
 
 /// Compute pane layout info and optionally resize pane runtimes to match.
 pub(super) fn compute_pane_infos(app: &AppState, area: Rect, resize_panes: bool) -> Vec<PaneInfo> {
@@ -29,18 +55,7 @@ pub(super) fn compute_pane_infos(app: &AppState, area: Rect, resize_panes: bool)
         let mut inner_rect = area;
         let mut scrollbar_rect = None;
         if let Some(rt) = ws.runtimes.get(&focused_id) {
-            if rt
-                .scroll_metrics()
-                .is_some_and(|metrics| should_show_scrollbar(metrics) && area.width > 1)
-            {
-                inner_rect.width = inner_rect.width.saturating_sub(1);
-                scrollbar_rect = Some(Rect::new(
-                    area.x + area.width.saturating_sub(1),
-                    area.y,
-                    1,
-                    area.height,
-                ));
-            }
+            (inner_rect, scrollbar_rect) = stable_scrollbar_gutter(rt, area);
             if resize_panes {
                 rt.resize(inner_rect.height, inner_rect.width);
             }
@@ -74,18 +89,7 @@ pub(super) fn compute_pane_infos(app: &AppState, area: Rect, resize_panes: bool)
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = ws.runtimes.get(&info.id) {
-            if rt
-                .scroll_metrics()
-                .is_some_and(|metrics| should_show_scrollbar(metrics) && pane_inner.width > 1)
-            {
-                inner_rect.width = inner_rect.width.saturating_sub(1);
-                scrollbar_rect = Some(Rect::new(
-                    pane_inner.x + pane_inner.width.saturating_sub(1),
-                    pane_inner.y,
-                    1,
-                    pane_inner.height,
-                ));
-            }
+            (inner_rect, scrollbar_rect) = stable_scrollbar_gutter(rt, pane_inner);
             if resize_panes {
                 rt.resize(inner_rect.height, inner_rect.width);
             }
@@ -220,6 +224,70 @@ mod tests {
     use super::*;
     use crate::pane::PaneRuntime;
     use crate::workspace::Workspace;
+
+    #[tokio::test]
+    async fn pane_scrollbar_gutter_is_reserved_before_scrollback_exists() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("test");
+        let root_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0].runtimes.insert(
+            root_pane,
+            PaneRuntime::test_with_scrollback_bytes(40, 8, 1024, b"ready\n"),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+
+        let area = Rect::new(10, 3, 40, 8);
+        let infos = compute_pane_infos(&app, area, false);
+        let info = &infos[0];
+
+        assert_eq!(info.rect, area);
+        assert_eq!(info.scrollbar_rect, None);
+        assert_eq!(info.inner_rect, Rect::new(10, 3, 39, 8));
+    }
+
+    #[tokio::test]
+    async fn zoomed_pane_scrollbar_gutter_is_reserved_before_scrollback_exists() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("test");
+        workspace.zoomed = true;
+        let root_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0].runtimes.insert(
+            root_pane,
+            PaneRuntime::test_with_scrollback_bytes(40, 8, 1024, b"ready\n"),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+
+        let area = Rect::new(10, 3, 40, 8);
+        let infos = compute_pane_infos(&app, area, false);
+        let info = &infos[0];
+
+        assert_eq!(info.rect, area);
+        assert_eq!(info.scrollbar_rect, None);
+        assert_eq!(info.inner_rect, Rect::new(10, 3, 39, 8));
+    }
+
+    #[tokio::test]
+    async fn tiny_pane_does_not_reserve_scrollbar_gutter() {
+        let mut app = AppState::test_new();
+        let mut workspace = Workspace::test_new("test");
+        let root_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0].runtimes.insert(
+            root_pane,
+            PaneRuntime::test_with_scrollback_bytes(4, 8, 1024, b"ready\n"),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+
+        let area = Rect::new(10, 3, 4, 8);
+        let infos = compute_pane_infos(&app, area, false);
+        let info = &infos[0];
+
+        assert_eq!(info.rect, area);
+        assert_eq!(info.scrollbar_rect, None);
+        assert_eq!(info.inner_rect, area);
+    }
 
     #[tokio::test]
     async fn pane_scrollbar_reserves_last_column_from_terminal_area() {

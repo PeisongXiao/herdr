@@ -32,7 +32,8 @@ pub struct PaneInfo {
     pub rect: Rect,
     /// Inner rect (content area, excluding borders). Used for selection.
     pub inner_rect: Rect,
-    /// Reserved scrollbar lane, when scrollback is visible.
+    /// Visible scrollbar lane, when scrollback is present. `inner_rect` may still
+    /// exclude a stable hidden gutter when this is `None`.
     pub scrollbar_rect: Option<Rect>,
     pub is_focused: bool,
 }
