@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- The OpenCode integration no longer treats `session.created` or `session.updated` plugin events as idle signals, so active sessions stay marked working until OpenCode reports `session.status` or `session.idle`. (#351)
+
 ## [0.6.5] - 2026-05-29
 
 ### Added

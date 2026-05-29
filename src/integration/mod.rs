@@ -27,7 +27,7 @@ const CODEX_INTEGRATION_VERSION: u32 = 4;
 const CODEX_HOME_ENV_VAR: &str = "CODEX_HOME";
 const OPENCODE_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state.js";
 const OPENCODE_PLUGIN_ASSET: &str = include_str!("assets/opencode/herdr-agent-state.js");
-const OPENCODE_INTEGRATION_VERSION: u32 = 2;
+const OPENCODE_INTEGRATION_VERSION: u32 = 3;
 const HERMES_PLUGIN_INSTALL_NAME: &str = "herdr-agent-state";
 const HERMES_PLUGIN_MANIFEST_INSTALL_NAME: &str = "plugin.yaml";
 const HERMES_PLUGIN_INIT_INSTALL_NAME: &str = "__init__.py";
@@ -2859,6 +2859,7 @@ mod tests {
         assert!(OPENCODE_PLUGIN_ASSET.contains("properties?.sessionID"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("dispose: async"));
         assert!(OPENCODE_PLUGIN_ASSET.contains("agent_session_id: sessionID"));
+        assert!(!OPENCODE_PLUGIN_ASSET.contains("await reportState(\"idle\", sessionID);\n          }\n          break;\n        case \"session.status\""));
         assert!(HERMES_PLUGIN_INIT_ASSET.contains("session_id = _session_id(kwargs)"));
         assert!(HERMES_PLUGIN_INIT_ASSET.contains("agent_session_id"));
         // Qoder hook reads the event from the stdin JSON payload (per
