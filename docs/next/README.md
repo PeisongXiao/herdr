@@ -47,7 +47,7 @@ Start Herdr in the directory where the work lives:
 herdr
 ```
 
-Herdr starts or attaches to one background session server. Press `ctrl+b`, then `shift+n` to create a workspace. Run an agent in the root pane. Press `ctrl+b`, then `v` or `minus` to split panes, `ctrl+b`, then `c` to create a tab, and `ctrl+b`, then `w` to switch workspaces.
+Herdr starts or attaches to one background session server. When a session has no workspaces, Herdr opens one automatically. Run an agent in the root pane. Press `ctrl+b`, then `shift+n` to create another workspace, `ctrl+b`, then `v` or `minus` to split panes, `ctrl+b`, then `c` to create a tab, and `ctrl+b`, then `w` to switch workspaces.
 
 Press `ctrl+b q` to detach the client. The server and pane processes keep running. Open another terminal and run `herdr` again to reattach.
 

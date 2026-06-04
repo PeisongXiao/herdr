@@ -806,6 +806,10 @@ impl App {
                 needs_render = true;
             }
 
+            if self.ensure_default_workspace() {
+                needs_render = true;
+            }
+
             let now = Instant::now();
             self.sync_animation_timer(now);
             self.sync_host_mouse_capture(&mut host_mouse_capture_active)?;
@@ -932,6 +936,33 @@ impl App {
         }
         *active = desired;
         Ok(())
+    }
+
+    pub(crate) fn ensure_default_workspace(&mut self) -> bool {
+        if !self.state.workspaces.is_empty() || self.state.mode == Mode::Onboarding {
+            return false;
+        }
+
+        let previous_mode = self.state.mode;
+        let preserve_mode = matches!(
+            previous_mode,
+            Mode::ReleaseNotes | Mode::ProductAnnouncement | Mode::Settings
+        );
+        let cwd = self.resolve_new_terminal_cwd(None);
+
+        match self.create_workspace_with_options(cwd, true) {
+            Ok(_) => {
+                if preserve_mode {
+                    self.state.mode = previous_mode;
+                }
+                true
+            }
+            Err(err) => {
+                tracing::error!(err = %err, "failed to create default workspace");
+                self.state.mode = Mode::Navigate;
+                false
+            }
+        }
     }
 
     pub(crate) fn dismiss_release_notes(&mut self) {
@@ -2641,6 +2672,18 @@ mod tests {
         );
 
         assert_eq!(cwd, std::path::PathBuf::from("/tmp/herdr-source"));
+    }
+
+    #[test]
+    fn new_terminal_cwd_follow_without_source_uses_home() {
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return;
+        };
+
+        let cwd =
+            creation::resolve_new_terminal_cwd(&crate::config::NewTerminalCwdConfig::Follow, None);
+
+        assert_eq!(cwd, home);
     }
 
     #[test]

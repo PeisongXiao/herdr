@@ -62,8 +62,16 @@ impl App {
         msg: crate::api::ApiRequestMessage,
     ) -> bool {
         let previous_mode = self.state.mode;
-        let changed = crate::api::request_changes_ui(&msg.request);
+        let mut changed = crate::api::request_changes_ui(&msg.request);
+        let skip_default_workspace = matches!(
+            &msg.request.method,
+            crate::api::schema::Method::ServerStop(_)
+                | crate::api::schema::Method::ServerLiveHandoff(_)
+        );
         let response = self.handle_api_request(msg.request);
+        if !skip_default_workspace {
+            changed |= self.ensure_default_workspace();
+        }
         let _ = msg.respond_to.send(response);
         self.sync_prefix_input_source(previous_mode);
         changed
