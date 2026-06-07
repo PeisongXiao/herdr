@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Native pane URL clicks now use Cmd-click on macOS and Ctrl-click on other platforms.
 - Windows beta installs now default to the preview channel, persist `channel = "preview"` during install, reject switching to stable until stable Windows builds exist, and update through the Windows installer without probing unsupported live-handoff/session status paths.
 - Pane output now renders flag emoji and other multi-codepoint grapheme clusters as complete symbols instead of blank cells. (#243)
 - Starting Herdr with no restored workspaces, or closing the last workspace, now opens a default workspace instead of leaving the client on an empty screen where direct keybindings such as `cmd+n` were shown but ignored. (#366)
