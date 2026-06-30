@@ -426,7 +426,7 @@ pub struct CellData {
     pub fg: u32,
     /// Background color as a packed u32.
     pub bg: u32,
-    /// Bitmask of style modifiers (bold, italic, etc.).
+    /// Bitmask of style modifiers (bold, italic, etc.) plus Herdr extension bits.
     pub modifier: u16,
     /// Whether this cell should be skipped during diff-based rendering.
     pub skip: bool,
@@ -729,15 +729,30 @@ fn u32_to_color(val: u32) -> ratatui::style::Color {
     }
 }
 
+const UNDERLINE_STYLE_SHIFT: u16 = 12;
+const UNDERLINE_STYLE_MASK: u16 = 0xF000;
+
 /// Converts a ratatui `Modifier` bitmask to a u16 for wire transport.
 pub(crate) fn modifier_to_u16(modifier: ratatui::style::Modifier) -> u16 {
     modifier.bits()
 }
 
+pub(crate) fn underline_style_from_modifier(modifier: u16) -> u8 {
+    ((modifier & UNDERLINE_STYLE_MASK) >> UNDERLINE_STYLE_SHIFT) as u8
+}
+
+pub(crate) fn modifier_with_underline_style(
+    modifier: ratatui::style::Modifier,
+    underline_style: u8,
+) -> ratatui::style::Modifier {
+    let bits = modifier.bits() | ((u16::from(underline_style) & 0x0F) << UNDERLINE_STYLE_SHIFT);
+    ratatui::style::Modifier::from_bits_retain(bits)
+}
+
 /// Converts a u16 back to a ratatui `Modifier`.
 #[cfg(test)]
 fn u16_to_modifier(val: u16) -> ratatui::style::Modifier {
-    ratatui::style::Modifier::from_bits_truncate(val)
+    ratatui::style::Modifier::from_bits_truncate(val & !UNDERLINE_STYLE_MASK)
 }
 
 // ---------------------------------------------------------------------------
