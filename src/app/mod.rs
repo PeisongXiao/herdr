@@ -13,6 +13,8 @@ mod config_io;
 mod creation;
 mod ids;
 mod input;
+mod peer_agents;
+mod remote_presentations;
 mod runtime;
 mod runtime_mutations;
 mod session;
@@ -91,9 +93,40 @@ impl PaneClickState {
     }
 }
 
+pub(crate) struct PendingOwnerActivation {
+    pub(crate) terminal_id: crate::terminal::TerminalId,
+    pub(crate) peer_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) peer: crate::api::schema::PeerInfo,
+    pub(crate) delegation: crate::api::schema::TerminalDelegationInfo,
+    pub(crate) release_bridge_on_owner_close: bool,
+    pub(crate) cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
 pub struct App {
     pub state: AppState,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
+    pub(crate) peer_bridges: HashMap<String, crate::remote_agent::PeerBridgeSet>,
+    pub(crate) remote_terminal_bridges: HashMap<crate::terminal::TerminalId, (String, String)>,
+    pub(crate) ssh_shell_bridges: HashMap<crate::terminal::TerminalId, Vec<(String, String)>>,
+    pub(crate) remote_owner_presentations:
+        HashMap<crate::terminal::TerminalId, crate::api::schema::TerminalDelegationInfo>,
+    pub(crate) remote_owner_peers: HashMap<crate::terminal::TerminalId, String>,
+    pub(crate) pending_owner_activations: HashMap<String, PendingOwnerActivation>,
+    pub(crate) pending_owner_operations: HashMap<crate::terminal::TerminalId, usize>,
+    pub(crate) remote_owner_deadlines: HashMap<crate::terminal::TerminalId, Instant>,
+    pub(crate) ssh_shell_bridge_deadlines: HashMap<(String, String), Instant>,
+    pub(crate) incoming_peer_deadlines: HashMap<String, Instant>,
+    pub(crate) remote_mirror_cancellations:
+        HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) peer_agent_cache: HashMap<String, Vec<crate::api::schema::AgentInfo>>,
+    pub(crate) peer_refresh_cancellations:
+        HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) peer_refresh_generations: HashMap<String, u64>,
+    pub(crate) peer_lifecycle_generations: HashMap<String, u64>,
+    pub(crate) remote_presentations: remote_presentations::RemotePresentationState,
+    pub(crate) next_peer_refresh_generation: u64,
+    pub(crate) remote_api_jobs_in_flight: usize,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
@@ -143,6 +176,10 @@ pub struct App {
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
 pub(crate) const APP_EVENT_DRAIN_LIMIT: usize = 64;
+pub(crate) const APP_EVENT_EXHAUSTIVE_DRAIN_BATCH_LIMIT: usize =
+    (APP_EVENT_CHANNEL_CAPACITY / APP_EVENT_DRAIN_LIMIT) + 1;
+pub(crate) const REMOTE_API_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const PEER_CLEANUP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) enum LoopEvent {
     Timer,
@@ -496,7 +533,9 @@ impl App {
 
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
+            peers: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
+            delegated_terminal_ids: std::collections::HashMap::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
@@ -691,6 +730,24 @@ impl App {
             last_api_notification_at: None,
             state,
             terminal_runtimes: restored_terminal_runtimes,
+            peer_bridges: HashMap::new(),
+            remote_terminal_bridges: HashMap::new(),
+            ssh_shell_bridges: HashMap::new(),
+            remote_owner_presentations: HashMap::new(),
+            remote_owner_peers: HashMap::new(),
+            pending_owner_activations: HashMap::new(),
+            pending_owner_operations: HashMap::new(),
+            remote_owner_deadlines: HashMap::new(),
+            ssh_shell_bridge_deadlines: HashMap::new(),
+            incoming_peer_deadlines: HashMap::new(),
+            remote_mirror_cancellations: HashMap::new(),
+            peer_agent_cache: HashMap::new(),
+            peer_refresh_cancellations: HashMap::new(),
+            peer_refresh_generations: HashMap::new(),
+            peer_lifecycle_generations: HashMap::new(),
+            remote_presentations: remote_presentations::RemotePresentationState::default(),
+            next_peer_refresh_generation: 1,
+            remote_api_jobs_in_flight: 0,
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -743,6 +800,7 @@ impl App {
         api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
         event_hub: crate::api::EventHub,
         snapshot: &crate::persist::SessionSnapshot,
+        handoff_public_pane_id_aliases: &std::collections::HashMap<String, u32>,
         imports: &mut std::collections::HashMap<
             u32,
             crate::handoff_runtime::ImportedHandoffRuntime,
@@ -760,6 +818,11 @@ impl App {
             app.render_dirty.clone(),
         )?;
         let pane_id_aliases = crate::persist::handoff_pane_aliases(snapshot, &workspaces);
+        let public_pane_id_aliases = crate::persist::handoff_public_pane_aliases(
+            snapshot,
+            &workspaces,
+            handoff_public_pane_id_aliases,
+        );
 
         app.no_session = false;
         let now = Instant::now();
@@ -775,6 +838,7 @@ impl App {
         }
         app.state.detach_exits = false;
         app.state.pane_id_aliases = pane_id_aliases;
+        app.state.public_pane_id_aliases = public_pane_id_aliases;
         app.state.workspaces = workspaces;
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
@@ -865,7 +929,8 @@ impl App {
             }
 
             // Drain a bounded internal-event batch for responsiveness. API handlers
-            // perform an exhaustive drain before reading pane/runtime state.
+            // drain enough batches to cover a full queued snapshot without allowing
+            // continuous producers to starve the request.
             if self.drain_internal_events() {
                 needs_render = true;
             }
@@ -1079,6 +1144,25 @@ impl App {
                     }
                 }
             }
+        }
+
+        if !self.quiesce_remote_api_jobs_for_shutdown(REMOTE_API_SHUTDOWN_TIMEOUT) {
+            tracing::warn!(
+                remaining = self.remote_api_jobs_in_flight,
+                "timed out waiting for remote API jobs during app shutdown"
+            );
+            self.event_rx.close();
+        }
+        let terminated_remote_presentations = self.terminate_all_remote_presentations();
+        if terminated_remote_presentations > 0 {
+            tracing::warn!(
+                count = terminated_remote_presentations,
+                "app shutdown terminated remotely presented panes"
+            );
+        }
+        self.shutdown_peer_runtime();
+        if !crate::remote_agent::wait_for_pending_peer_cleanup(PEER_CLEANUP_SHUTDOWN_TIMEOUT) {
+            tracing::warn!("timed out waiting for SSH peer cleanup during app shutdown");
         }
 
         // Save session on exit (skip in --no-session mode)
@@ -1561,27 +1645,25 @@ impl App {
                 crate::raw_input::RawInputEvent::Paste(text) => {
                     if self.state.mode != Mode::Terminal {
                         self.paste_into_active_text_input(&text);
-                    } else {
-                        if let Some(ws_idx) = self.state.active {
-                            if let Some(ws) = self.state.workspaces.get(ws_idx) {
-                                if let Some(focused) = ws.focused_pane_id() {
-                                    if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
-                                        &self.terminal_runtimes,
-                                        ws_idx,
-                                        focused,
-                                    ) {
-                                        let _ = runtime.try_send_bytes(bytes::Bytes::from(
-                                            if runtime
-                                                .input_state()
-                                                .map(|s| s.bracketed_paste)
-                                                .unwrap_or(false)
-                                            {
-                                                format!("\x1b[200~{text}\x1b[201~")
-                                            } else {
-                                                text
-                                            },
-                                        ));
-                                    }
+                    } else if let Some(ws_idx) = self.state.active {
+                        if let Some(ws) = self.state.workspaces.get(ws_idx) {
+                            if let Some(focused) = ws.focused_pane_id() {
+                                if let Some(runtime) = self.state.runtime_for_pane_in_workspace(
+                                    &self.terminal_runtimes,
+                                    ws_idx,
+                                    focused,
+                                ) {
+                                    let _ = runtime.try_send_bytes(bytes::Bytes::from(
+                                        if runtime
+                                            .input_state()
+                                            .map(|s| s.bracketed_paste)
+                                            .unwrap_or(false)
+                                        {
+                                            format!("\x1b[200~{text}\x1b[201~")
+                                        } else {
+                                            text
+                                        },
+                                    ));
                                 }
                             }
                         }
@@ -2211,6 +2293,7 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(response["result"]["type"], "ok");
+        assert_eq!(response["result"]["terminated_remote_presentations"], 0);
         let expected_version = format!("3.0.{APP_EVENT_DRAIN_LIMIT}");
         assert_eq!(
             app.state.update_available.as_deref(),
@@ -3354,6 +3437,7 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(response["result"]["type"], "ok");
+        assert_eq!(response["result"]["terminated_remote_presentations"], 0);
         assert!(app.state.should_quit);
     }
 
@@ -3794,6 +3878,8 @@ mod tests {
             id: "req_agent_start_focus".into(),
             method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
                 name: "worker".into(),
+                peer: None,
+                agent: None,
                 cwd: None,
                 workspace_id: None,
                 tab_id: None,
@@ -3801,6 +3887,7 @@ mod tests {
                 focus: true,
                 argv: vec![exiting_test_command().into()],
                 env: Default::default(),
+                transport: None,
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3817,6 +3904,43 @@ mod tests {
         for (_terminal_id, runtime) in runtimes {
             runtime.shutdown();
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_start_accepts_ssh_transport_on_the_normal_api() {
+        let mut app = test_app();
+        let missing_control_path = std::env::temp_dir().join(format!(
+            "herdr-missing-control-{}-normal-api",
+            std::process::id()
+        ));
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req_agent_start_ssh".into(),
+            method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                name: "remote-worker".into(),
+                peer: None,
+                agent: Some("opencode".into()),
+                cwd: None,
+                workspace_id: None,
+                tab_id: None,
+                split: None,
+                focus: false,
+                argv: vec!["opencode".into()],
+                env: Default::default(),
+                transport: Some(crate::api::schema::AgentStartTransport::Ssh {
+                    target: "remote".into(),
+                    ssh_args: Vec::new(),
+                    managed_control_path: Some(missing_control_path.display().to_string()),
+                    session: None,
+                    prepare_integration: false,
+                }),
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["error"]["code"], "agent_start_failed");
+        assert_ne!(response["error"]["code"], "invalid_peer_transport");
     }
 
     #[test]
@@ -3910,6 +4034,69 @@ mod tests {
         assert_eq!(app.state.mode, Mode::ConfirmClose);
         assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn pane_close_skips_worktree_confirmation_for_a_remote_presentation_owner() {
+        let mut app = test_app();
+        let mut parent = Workspace::test_new("api-pane-close-owner-parent");
+        parent.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        let mut child = Workspace::test_new("api-pane-close-owner-child");
+        child.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr-child".into(),
+            is_linked_worktree: true,
+        });
+        app.state.workspaces = vec![parent, child];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 1;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let target_pane_id = app.pane_info(0, pane_id).unwrap().pane_id;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("terminal")
+            .clone();
+        app.remote_owner_presentations.insert(
+            terminal_id,
+            crate::api::schema::TerminalDelegationInfo {
+                delegation_id: "delegation".into(),
+                epoch: 1,
+                terminal_id: "remote-terminal".into(),
+                pane_id: "remote-pane".into(),
+                origin_peer_id: "remote".into(),
+                owner: crate::api::schema::TerminalPresentationOwner {
+                    peer_id: "owner".into(),
+                    pane_id: target_pane_id.clone(),
+                    route: vec!["owner".into(), "remote".into()],
+                },
+                status: crate::api::schema::TerminalDelegationStatus::Active,
+            },
+        );
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "close-owner".into(),
+            method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
+                pane_id: target_pane_id,
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "ok");
+        assert_ne!(app.state.mode, Mode::ConfirmClose);
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(
+            app.state.workspaces[0].display_name(),
+            "api-pane-close-owner-child"
+        );
     }
 
     #[test]

@@ -826,9 +826,18 @@ pub fn run_client() -> io::Result<()> {
 /// Runs a direct terminal attach client.
 #[cfg(unix)]
 pub fn run_terminal_attach(terminal_id: String, takeover: bool) -> io::Result<()> {
+    run_terminal_attach_with_delegation(terminal_id, takeover, None)
+}
+
+#[cfg(unix)]
+pub fn run_terminal_attach_with_delegation(
+    terminal_id: String,
+    takeover: bool,
+    delegation: Option<crate::api::schema::TerminalDelegationClaim>,
+) -> io::Result<()> {
     run_client_with_mode(
         RenderEncoding::TerminalAnsi,
-        Some((terminal_id, takeover)),
+        Some((terminal_id, takeover, delegation)),
         Some(AttachEscapeState::default()),
         "attaching to terminal",
     )
@@ -1103,7 +1112,11 @@ fn terminal_control_command_from_json(raw: &str) -> Result<ClientMessage, String
 
 fn run_client_with_mode(
     requested_encoding: RenderEncoding,
-    attach_request: Option<(String, bool)>,
+    attach_request: Option<(
+        String,
+        bool,
+        Option<crate::api::schema::TerminalDelegationClaim>,
+    )>,
     attach_escape: Option<AttachEscapeState>,
     log_message: &'static str,
 ) -> io::Result<()> {
@@ -1116,6 +1129,7 @@ fn run_client_with_mode(
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
     let host_cursor = loaded_config.config.ui.host_cursor;
     let direct_attach_requested = attach_request.is_some();
+    let terminal_attach_activated = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
     let kitty_graphics_enabled =
@@ -1167,10 +1181,17 @@ fn run_client_with_mode(
         }
     };
 
-    if let Some((terminal_id, takeover)) = attach_request {
-        let attach = ClientMessage::AttachTerminal {
-            terminal_id,
-            takeover,
+    if let Some((terminal_id, takeover, delegation)) = attach_request {
+        let attach = match delegation {
+            Some(delegation) => ClientMessage::AttachDelegatedTerminal {
+                terminal_id,
+                takeover,
+                delegation,
+            },
+            None => ClientMessage::AttachTerminal {
+                terminal_id,
+                takeover,
+            },
         };
         if let Err(err) = write_to_server(&mut stream, &attach) {
             eprintln!("herdr: failed to request terminal attach: {err}");
@@ -1230,6 +1251,7 @@ fn run_client_with_mode(
             loop_config,
             negotiated_encoding,
             attach_escape,
+            Arc::clone(&terminal_attach_activated),
         )
         .await
     });
@@ -1248,6 +1270,9 @@ fn run_client_with_mode(
                 reason: Some(reason)
             } if reason == "detached"
         ) {
+            return Ok(());
+        }
+        if direct_attach_requested && terminal_attach_activated.load(Ordering::Acquire) {
             return Ok(());
         }
 
@@ -1274,6 +1299,7 @@ async fn run_client_loop(
     config: ClientLoopConfig,
     negotiated_encoding: RenderEncoding,
     attach_escape: Option<AttachEscapeState>,
+    terminal_attach_activated: Arc<AtomicBool>,
 ) -> Result<(), ClientError> {
     #[cfg(windows)]
     let _ = config.mouse_scroll_lines;
@@ -1500,6 +1526,7 @@ async fn run_client_loop(
                     state.blit_encoder.commit(frame_data, encoded);
                 }
                 ServerMessage::Terminal(frame) => {
+                    terminal_attach_activated.store(true, Ordering::Release);
                     if state.kitty_graphics_enabled && contains_kitty_graphics_bytes(&frame.bytes) {
                         record_received_kitty_graphics(&frame.bytes);
                     }

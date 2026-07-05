@@ -90,6 +90,7 @@ pub struct TerminalState {
     pub last_agent_state_change_seq: Option<u64>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
+    pub remote_agent_transport: Option<crate::api::schema::AgentTransportInfo>,
     pub respawn_shell_on_exit: bool,
     recent_agent_process_exit_at: Option<Instant>,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
@@ -117,6 +118,7 @@ impl TerminalState {
             last_agent_state_change_seq: None,
             revision: 0,
             launch_argv: None,
+            remote_agent_transport: None,
             respawn_shell_on_exit: false,
             recent_agent_process_exit_at: None,
             pending_agent_resume_plan: None,
@@ -1209,6 +1211,7 @@ impl TerminalState {
         self.state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
         self.launch_argv = None;
+        self.remote_agent_transport = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit_at = None;
         self.pending_agent_resume_plan = None;
@@ -3919,6 +3922,16 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.respawn_shell_on_exit = true;
         terminal.set_agent_name("codex".into());
+        terminal.remote_agent_transport = Some(crate::api::schema::AgentTransportInfo::Ssh {
+            target: "devbox".into(),
+            ssh_args: Vec::new(),
+            managed_control_path: None,
+            session: None,
+            remote_terminal_id: "term_remote".into(),
+            remote_pane_id: "w1:p2".into(),
+            remote_agent: Some("codex".into()),
+            remote_cwd: Some("/repo".into()),
+        });
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
             source: "herdr:codex".into(),
             agent: "codex".into(),
@@ -3932,6 +3945,7 @@ mod tests {
         assert!(terminal.detected_agent.is_none());
         assert!(terminal.agent_name.is_none());
         assert!(terminal.persisted_agent_session.is_none());
+        assert!(terminal.remote_agent_transport.is_none());
         assert!(!terminal.respawn_shell_on_exit);
     }
 

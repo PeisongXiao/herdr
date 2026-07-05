@@ -45,6 +45,14 @@ mise use -g herdr
 
 if mise reports `herdr not found in mise tool registry`, update mise and retry. older mise versions predate the herdr registry entry; `mise use -g github:ogulcancelik/herdr` works as a temporary fallback.
 
+or build the checkout locally on Linux or macOS x86_64/aarch64:
+
+```bash
+./install-local.sh
+```
+
+the source installer verifies that Cargo, Rust, and the selected C compiler/linker can run, requires exactly Zig 0.15.2, then installs to `~/.local/bin/herdr` by default. rerun it after updating the checkout; an already-running server keeps using its old process until that session is restarted or handed off. see the [install docs](https://herdr.dev/docs/install/) for dependency checks and destination options.
+
 or download the stable Linux/macOS binary from [releases](https://github.com/ogulcancelik/herdr/releases). Native Windows binaries are preview-only beta builds.
 
 ## quick start
@@ -117,9 +125,23 @@ tmux gives you persistence and panes, but it was built before agents existed. gu
 
 ## remote and attach
 
-Herdr works over normal SSH. Run it on the remote host, detach, and reattach later:
+On Linux and macOS, the direct path is to start Herdr locally and run SSH inside one of its panes:
 
+```bash
+herdr
+# inside a Herdr pane
+ssh you@yourserver
 ```
+
+Herdr leaves host checks and authentication to normal OpenSSH, then automatically finds or starts the remote Herdr daemon, links the two servers, and presents a new remote shell in the pane you already have. The remote host must already have a compatible Herdr with peer federation and remote presentation support; this path does not install or upgrade it. If that requirement or managed setup fails, Herdr prints a warning and runs the original SSH command as ordinary unmanaged SSH instead. Explicit `herdr agent start --ssh` requests fail rather than falling back.
+
+The remote pane is delegated, not mirrored: it appears in a workspace on exactly one machine. Ending the SSH connection, closing its owner pane, or stopping the owner Herdr server destroys the delegated pane and its process. To keep it on the remote host, run `herdr remote-handoff` inside the remote pane before disconnecting; Herdr moves only the pane containing your cursor into a new workspace on that host. Nested managed SSH repeats the same model for each hop, and handoff applies to the innermost pane. Moving an already presented peer agent requires an explicit `herdr agent attach peer::target --takeover`; unwind a deeper active remote hop before taking over its owner pane.
+
+Plain pane SSH and `herdr agent start --ssh` select remote session `default` explicitly, so inherited or SSH-accepted Herdr routing variables cannot redirect them; a named agent session requires `--ssh-session NAME`. Remote-command, noninteractive, forwarding, and other incompatible semantics from arguments or effective SSH config run through ordinary SSH with the original argv unchanged. On macOS, newly created default login-zsh panes restore the user's `ZDOTDIR` and startup files, then re-prepend and rehash the shim after `path_helper` at the first prompt; aliases, functions, and explicit absolute `ssh` paths retain their normal meaning.
+
+For the traditional multiplexer path, SSH from outside Herdr and run it on the remote host:
+
+```bash
 ssh you@yourserver
 herdr
 ```

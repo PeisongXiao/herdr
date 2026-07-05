@@ -7,6 +7,7 @@ pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>
 
     match subcommand {
         "stop" => server_stop(&args[1..]).map(Some),
+        "ensure" => server_ensure(&args[1..]).map(Some),
         "live-handoff" => server_live_handoff(&args[1..]).map(Some),
         "--handoff-import" => Ok(None),
         "reload-config" => server_reload_config(&args[1..]).map(Some),
@@ -30,7 +31,61 @@ fn server_stop(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     }
 
-    super::send_ok_request(Method::ServerStop(EmptyParams::default()))
+    let response = super::send_request(&Request {
+        id: "cli:server:stop".into(),
+        method: Method::ServerStop(EmptyParams::default()),
+    })?;
+    if response.get("error").is_some() {
+        eprintln!("{}", serde_json::to_string(&response).unwrap());
+        return Ok(1);
+    }
+    let terminated = response["result"]["terminated_remote_presentations"]
+        .as_u64()
+        .unwrap_or(0);
+    if terminated > 0 {
+        eprintln!(
+            "warning: stopping Herdr will terminate {terminated} remotely presented pane(s); use `herdr remote-handoff` inside a pane before stopping to keep it running on its host"
+        );
+    }
+    Ok(0)
+}
+
+fn server_ensure(args: &[String]) -> std::io::Result<i32> {
+    let json = match args {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        _ => {
+            eprintln!("usage: herdr server ensure [--json]");
+            return Ok(2);
+        }
+    };
+
+    let was_running = crate::server::autodetect::is_server_listening();
+    let mut pid = None;
+    if !was_running {
+        pid = Some(crate::server::autodetect::spawn_server_daemon()?);
+        crate::server::autodetect::wait_for_server_socket(
+            &crate::server::socket_paths::client_socket_path(),
+            std::time::Duration::from_secs(15),
+        )?;
+    }
+
+    if json {
+        let response = serde_json::json!({
+            "running": true,
+            "started": !was_running,
+            "pid": pid,
+            "socket": crate::server::socket_paths::client_socket_path().display().to_string(),
+            "api_socket": crate::api::socket_path().display().to_string(),
+        });
+        println!("{response}");
+    } else if was_running {
+        println!("Herdr server is already running.");
+    } else if let Some(pid) = pid {
+        println!("Started Herdr server (pid {pid}).");
+    }
+
+    Ok(0)
 }
 
 fn server_reload_config(args: &[String]) -> std::io::Result<i32> {
@@ -247,6 +302,7 @@ fn parse_live_handoff_params(args: &[String]) -> Option<ServerLiveHandoffParams>
 fn print_server_help() {
     eprintln!("herdr server commands:");
     eprintln!("  herdr server                run as headless server");
+    eprintln!("  herdr server ensure [--json]  start the background server if needed");
     eprintln!("  herdr server stop           stop the running server via the API socket");
     eprintln!("  herdr server live-handoff   hand off live panes to a new local server");
     eprintln!("  herdr server reload-config  reload config.toml in the running server");

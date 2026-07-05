@@ -1034,6 +1034,7 @@ fn help_commands_exit_successfully() {
         &["completion", "-h"],
         &["status", "-h"],
         &["server", "-h"],
+        &["remote-handoff", "-h"],
         &["workspace", "-h"],
         &["worktree", "-h"],
         &["tab", "-h"],
@@ -1127,6 +1128,21 @@ fn root_help_advertises_api_schema_command_group() {
     assert!(
         stdout.contains("herdr api <subcommand>"),
         "root help should advertise the api command group: {stdout}"
+    );
+}
+
+#[test]
+fn root_help_advertises_remote_handoff() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("herdr remote-handoff"),
+        "root help should advertise remote handoff: {stdout}"
     );
 }
 

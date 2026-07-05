@@ -40,11 +40,16 @@ API schema commands:
 herdr api schema
 herdr api schema --json
 herdr api schema --output herdr-api.schema.json
+herdr api bridge
 ```
 
 `herdr api schema` prints a short summary of the socket protocol schema bundled
 with the installed binary. Use `--json` for the full JSON Schema document, or
-`--output PATH` to write that document to a file.
+`--output PATH` to write that document to a file. `api bridge` reads an initial
+JSON request from stdin, forwards it to the local full API socket, and streams
+the response to stdout. Herdr invokes it through authenticated SSH commands for
+federation setup and remote-agent status; it does not publish that socket over
+the peer link.
 
 ## Shell completions
 
@@ -84,6 +89,7 @@ compinit
 
 ```bash
 herdr server
+herdr server ensure [--json]
 herdr server stop
 herdr server reload-config
 herdr server agent-manifests [--json]
@@ -91,7 +97,7 @@ herdr server update-agent-manifests [--json]
 herdr server reload-agent-manifests
 ```
 
-`herdr server` runs the headless server explicitly. Use it for supervised or service-style setups. `reload-config` applies reloadable settings without restarting panes. `agent-manifests` shows the active agent detection manifest sources, cached remote versions, and last remote update results. `update-agent-manifests` fetches remote manifest updates immediately, reloads them into the running server, and prints the updated manifest status; pass `--json` for the raw status response. `reload-agent-manifests` reloads agent detection manifests into the running server after local override edits.
+`herdr server` runs the headless server explicitly. Use it for supervised or service-style setups. `ensure` starts the background server only when it is not already running. `server stop` warns when remotely presented panes will be terminated; run `herdr remote-handoff` inside a pane first when it must continue on its host. `reload-config` applies reloadable settings without restarting panes. `agent-manifests` shows the active agent detection manifest sources, cached remote versions, and last remote update results. `update-agent-manifests` fetches remote manifest updates immediately, reloads them into the running server, and prints the updated manifest status; pass `--json` for the raw status response. `reload-agent-manifests` reloads agent detection manifests into the running server after local override edits.
 
 ## Notifications
 
@@ -257,16 +263,34 @@ herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
 herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
 herdr agent attach <target> [--takeover]
-herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+herdr agent start <name> [--agent AGENT] [--peer PEER] [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] [--ssh TARGET] [--ssh-session NAME] [--no-remote-integration] -- <argv...>
 herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
+herdr ssh <ssh-args...>
+herdr remote-handoff
 ```
 
-Agent targets can be terminal IDs, unique agent names, detected or reported agent labels, or legacy pane IDs. Names and labels are agent identities. Terminal IDs and legacy pane IDs are low-level escape hatches.
+Agent targets can be terminal IDs, unique agent names, detected or reported agent labels, `peer::target`, or legacy pane IDs. Names and labels are agent identities. Terminal IDs and legacy pane IDs are low-level escape hatches.
 
 `agent read` reads the resolved terminal stream. `agent send` writes literal text to that stream. `agent get`, `agent focus`, `agent wait`, and `agent attach` require the resolved terminal to have agent identity. `agent rename` can assign that identity.
 
 `agent explain` asks the running server to classify the same bottom-buffer detection snapshot used by screen detection, so live output reflects the server's active manifest cache. Because this uses the `agent.explain` socket method, restart or hand off to an updated server after upgrading Herdr before using live explain. Use `--file PATH --agent LABEL` to explain a saved fixture locally instead. The default output shows the agent, final state, manifest source and version, matched rule with its region evidence, and any fallback, skip, or warning reasons. Add `--verbose` for visible evidence flags, cached remote version, local override shadowing, remote update status, and the full evaluated-rules list with matcher and region evidence. Add `--json` for issue reports or tests.
+
+`agent start --ssh TARGET` is Unix-only. It finds Herdr on the remote `PATH` or in known per-user, system, Homebrew, mise, and Nix locations such as `~/.local/bin/herdr`, starts a compatible remote daemon, starts the agent, and delegates its pane into the local workspace. It does not bootstrap or update the remote binary. `--agent AGENT` selects the official integration to prepare; without it, Herdr tries to recognize `argv[0]`. Pass `--no-remote-integration` to skip setup. The start explicitly selects remote Herdr session `default` unless `--ssh-session NAME` selects a named session, so inherited or SSH-accepted Herdr session and socket variables cannot redirect it. Put custom SSH connection options in SSH config. The CLI checks effective SSH config before opening managed SSH, and the server enforces the same interactive-only boundary for direct API starts.
+
+The delegated agent pane has one presentation owner and is removed from the remote workspace while local Herdr presents it. Closing that owner pane, stopping the owner Herdr server, or losing SSH terminates the remote pane and agent; it does not restore as a shell or remain available for later reattach. Run `herdr remote-handoff` inside it first when the pane should continue in a new workspace on the remote host.
+
+The SSH start also registers a runtime peer. From the initiating server, peer targets support `agent list`, `get`, `read`, `explain`, `send`, `rename`, `wait`, `attach`, and `start`. The restricted reverse link supports `ping`, `list`, `get`, and the one-way presentation-activation acknowledgement; it cannot explain origin agents or read terminal or detection-preview data, inject input, or launch origin processes. `agent focus` does not change focus on another server; use `agent attach peer::target`. A peer attach must run inside the pane that will own the presentation. It refuses an already presented pane unless `--takeover` is explicit; takeover disconnects the prior owner rather than duplicating the pane. A pane with a deeper active remote presentation must unwind that deeper hop before takeover. `agent start --peer PEER` starts an agent on a peer reached in the SSH trust direction, without presenting its pane locally, and does not accept `--focus`.
+
+Inside a Unix Herdr pane, a destination-only interactive `ssh TARGET` is routed through `herdr ssh`. Common connection and authentication options such as `-p`, `-i`, `-J`, `-F`, `-A`, `-4`/`-6`, and compatible `-o` settings are preserved. TTY flags are accepted, and the final attach always requests a TTY. OpenSSH performs host-key and credential prompts in the foreground, then Herdr reuses its control connection to find or start the remote Herdr daemon, verify matching protocol plus `peer_federation` and `remote_presentation` capabilities, register the restricted peer-agent bridge, and claim a new remote shell. The delegated shell explicitly belongs to remote Herdr session `default` and inherits the SSH session's directory and environment; inherited or accepted Herdr routing variables cannot select another session. Plain `ssh` does not select a named Herdr session; an explicit remote agent start may select one with `--ssh-session NAME`.
+
+Commands after the destination, `-L`/`-R`/`-D`/`-W` forwarding, `-w` tunnels, `-N`, `-f`, `-s`, `-T`, equivalent semantic `-o` forms, and unrecognized option shapes fall through to the real `ssh`. Herdr also checks effective SSH config: remote-command, noninteractive or sessionless, local-command, forwarding, and tunnel semantics selected by `Host`, `Match`, or included config cause the original raw argv to fall through unchanged. A missing or incompatible remote Herdr, a failed capability check, a local API error, or another managed-setup failure prints a warning and reruns the original raw argv as ordinary SSH. `scp` and `sftp` are unchanged. Set `[remote].ssh_integration = false` or run `HERDR_SSH_BYPASS=1 ssh TARGET` to bypass the shim. Explicit `agent start --ssh` and API starts fail instead of taking this pane-only fallback.
+
+Managed peer setup requires remote Unix-socket forwarding to be allowed by the SSH daemon and any applicable `authorized_keys` options. If it is denied, Herdr retains the actionable `remote peer bridge failed` diagnostic that identifies remote Unix-socket forwarding and server or authorized-key restrictions. Explicit agent and API starts stop instead of claiming one-way or partial awareness; the pane shim then runs the original SSH argv. See [Persistence and remote access](/docs/persistence-remote/) for details.
+
+Managed pane SSH is exclusive and destructive. The remote daemon keeps the process and PTY, but removes the delegated pane from its workspaces while the initiating machine presents it. When SSH disconnects, its owner pane closes, or the owning Herdr server stops, the remote daemon terminates the delegated pane. A rejected final attach abandons its prepared claim and leaves the local owner pane intact instead of cascading a close. Nested supported SSH carries the same owner through each successful hop; disconnect unwinds the active chain.
+
+`herdr remote-handoff` takes no arguments and must be run inside the currently delegated pane containing your cursor. It moves only that live pane into a new workspace on its actual host, ends the managed attach, and closes the old owner pane. In a nested SSH chain it hands off the innermost pane. Herdr rejects an intermediate handoff while that pane owns or is preparing a deeper remote presentation. It is unrelated to the server-replacement `--handoff` options. Use `herdr agent attach peer::target --takeover` to replace another presentation owner explicitly; Herdr never takes over implicitly.
 
 Use `pane send-text`, `pane send-keys`, `pane run`, and `terminal attach` for ordinary terminals, servers, tests, shells, or low-level terminal control. Use `pane run` when you want to submit a command with Enter.
 
@@ -274,6 +298,7 @@ Use `pane send-text`, `pane send-keys`, `pane run`, and `terminal attach` for or
 
 ```bash
 herdr terminal attach <terminal_id> [--takeover]
+herdr terminal shell [--label LABEL]
 herdr terminal session control <target> [--takeover] [--cols N] [--rows N]
 herdr terminal session observe <target> [--cols N] [--rows N]
 herdr terminal title set <title>
@@ -281,6 +306,10 @@ herdr terminal title clear
 ```
 
 Detach from direct attach with `ctrl+b q`. Send literal `ctrl+b` with `ctrl+b ctrl+b`.
+`terminal shell` creates a server-owned shell tab from the caller's current
+directory and environment, removes Herdr's internal routing variables, and
+attaches to it. Managed pane SSH instead prepares an exclusive terminal
+delegation and commits it through `terminal attach`.
 `terminal session control` opens a writable live terminal stream for a pane,
 terminal, or agent target. It prints the same newline-delimited
 `terminal.frame` and `terminal.closed` records as observe mode. It reads
@@ -293,6 +322,16 @@ records with base64-encoded ANSI bytes, then a `terminal.closed` record when
 the server closes the stream. Multiple observers can watch the same terminal
 without taking input, resize, scroll, or takeover authority.
 `terminal title clear` restores Herdr's default outer terminal window title.
+
+## Peers
+
+```bash
+herdr peer list
+herdr peer health <peer_id>
+herdr peer unregister <peer_id>
+```
+
+Peers are runtime links created by `ssh TARGET` inside a Herdr pane or by `herdr agent start --ssh`. `peer list` shows their generated ids, `peer health` refreshes reachability, and `peer unregister` removes all managed bridges for that peer. A plain SSH bridge closes with its foreground attach; while it is open, the wrapper renews a 15-second server lease so abrupt wrapper termination is cleaned up automatically. The incoming reverse registration has its own 15-second lease, renewed only after a successful metadata refresh, so origin crashes or network loss remove ghost peers. A peer-agent attachment uses its own 15-second owner-presentation lease, renewed by successful remote metadata snapshots, so closing or crashing that attachment does not consume or tear down the shared peer bridge. Every bridge conditionally unregisters only the registration for its own forwarded socket, preserving concurrent bridges. Peer-aware agent commands accept `peer::target`. Links are not durable machine pairings and must be recreated after the owning Herdr server restarts. Losing an owning link terminates its delegated pane unless `remote-handoff` has already moved that pane into a workspace on its host. Active links, active presentation leases, and detached bridge cleanup block server live handoff; after unregistering, wait for cleanup to finish before retrying.
 
 ## Waits
 

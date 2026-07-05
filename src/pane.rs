@@ -99,8 +99,11 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
     for (key, value) in &launch_env.extra {
         cmd.env(key, value);
     }
+    let macos_zsh_login_shell =
+        command_uses_macos_zsh_login_shell_for_target(cmd, ShellLaunchTarget::current());
     cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
     crate::integration::apply_pane_base_env(cmd);
+    crate::ssh_integration::apply_pane_env(cmd, &launch_env.extra, macos_zsh_login_shell);
     if let Some(identity) = &launch_env.identity {
         cmd.env(
             crate::integration::HERDR_WORKSPACE_ID_ENV_VAR,
@@ -1254,6 +1257,21 @@ fn shell_mode_uses_login_shell(
         crate::config::ShellModeConfig::Login => true,
         crate::config::ShellModeConfig::NonLogin => false,
     }
+}
+
+fn command_uses_macos_zsh_login_shell_for_target(
+    command: &CommandBuilder,
+    target: ShellLaunchTarget,
+) -> bool {
+    target == ShellLaunchTarget::Macos
+        && command.is_default_prog()
+        && command
+            .get_env("SHELL")
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default()
+            .rsplit(['/', '\\'])
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("zsh"))
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -2832,6 +2850,34 @@ mod tests {
         assert!(!shell_mode_uses_login_shell(
             crate::config::ShellModeConfig::NonLogin,
             ShellLaunchTarget::Macos
+        ));
+    }
+
+    #[test]
+    fn macos_login_zsh_is_the_only_shell_needing_the_zdotdir_bootstrap() {
+        let mut login_zsh = CommandBuilder::new_default_prog();
+        login_zsh.env("SHELL", "/bin/zsh");
+        assert!(command_uses_macos_zsh_login_shell_for_target(
+            &login_zsh,
+            ShellLaunchTarget::Macos,
+        ));
+        assert!(!command_uses_macos_zsh_login_shell_for_target(
+            &login_zsh,
+            ShellLaunchTarget::OtherUnix,
+        ));
+
+        let mut login_bash = CommandBuilder::new_default_prog();
+        login_bash.env("SHELL", "/bin/bash");
+        assert!(!command_uses_macos_zsh_login_shell_for_target(
+            &login_bash,
+            ShellLaunchTarget::Macos,
+        ));
+
+        let mut direct_zsh = CommandBuilder::new("/bin/zsh");
+        direct_zsh.env("SHELL", "/bin/zsh");
+        assert!(!command_uses_macos_zsh_login_shell_for_target(
+            &direct_zsh,
+            ShellLaunchTarget::Macos,
         ));
     }
 

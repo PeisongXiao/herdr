@@ -3,9 +3,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::api::client::{ApiClient, ApiClientError};
+#[cfg(unix)]
+use crate::api::schema::{
+    AgentAttachInfo, PeerConnectSshParams, PeerDisconnectSshParams, PeerKeepaliveSshParams,
+};
 use crate::api::schema::{
     AgentStatus, ClientWindowTitleSetParams, EmptyParams, Method, OutputMatch, PaneAgentState,
     PaneWaitForOutputParams, ReadFormat, ReadSource, Request, SplitDirection, Subscription,
+    TabCreateParams,
 };
 
 mod agent;
@@ -14,6 +19,7 @@ mod completion;
 mod integration;
 mod notification;
 mod pane;
+mod peer;
 mod plugin;
 mod server;
 mod spec;
@@ -45,6 +51,19 @@ pub enum CommandOutcome {
     NotCli,
 }
 
+pub(crate) fn run_ssh_os_command(args: &[std::ffi::OsString]) -> std::io::Result<i32> {
+    match ssh_os_args_as_utf8(args) {
+        Some(args) => run_ssh_command(&args),
+        None => crate::ssh_integration::run_real_ssh_os_args(args),
+    }
+}
+
+fn ssh_os_args_as_utf8(args: &[std::ffi::OsString]) -> Option<Vec<String>> {
+    args.iter()
+        .map(|arg| arg.to_str().map(str::to_string))
+        .collect()
+}
+
 pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     let Some(command) = args.get(1).map(|arg| arg.as_str()) else {
         return Ok(CommandOutcome::NotCli);
@@ -67,8 +86,11 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "tab" => tab::run_tab_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
+        "ssh" => run_ssh_command(&args[2..])?,
+        "remote-handoff" => run_remote_handoff_command(&args[2..])?,
         "terminal" => run_terminal_command(&args[2..])?,
         "pane" => pane::run_pane_command(&args[2..])?,
+        "peer" => peer::run_peer_command(&args[2..])?,
         "plugin" => plugin::run_plugin_command(&args[2..])?,
         "wait" => run_wait_command(&args[2..])?,
         "integration" => integration::run_integration_command(&args[2..])?,
@@ -77,6 +99,39 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     };
 
     Ok(CommandOutcome::Handled(exit_code))
+}
+
+fn run_remote_handoff_command(args: &[String]) -> std::io::Result<i32> {
+    if matches!(
+        args.first().map(String::as_str),
+        Some("help" | "--help" | "-h")
+    ) {
+        println!("usage: herdr remote-handoff");
+        return Ok(0);
+    }
+    if !args.is_empty() {
+        eprintln!("usage: herdr remote-handoff");
+        return Ok(2);
+    }
+    let Some(pane_id) = std::env::var(crate::integration::HERDR_PANE_ID_ENV_VAR)
+        .ok()
+        .filter(|pane_id| !pane_id.is_empty())
+    else {
+        eprintln!("remote-handoff must be run in the Herdr pane containing your cursor");
+        return Ok(1);
+    };
+    let response = send_request(&Request {
+        id: "cli:remote-handoff".into(),
+        method: Method::TerminalDelegateHandoff(
+            crate::api::schema::TerminalDelegateHandoffParams { pane_id },
+        ),
+    })?;
+    if let Some(message) = response["error"]["message"].as_str() {
+        eprintln!("remote-handoff failed: {message}");
+        return Ok(1);
+    }
+    println!("remote pane handed off to a new workspace on this machine");
+    Ok(0)
 }
 
 fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
@@ -330,6 +385,7 @@ fn run_terminal_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "attach" => terminal_attach(&args[1..]),
+        "shell" => terminal_shell(&args[1..]),
         "session" => terminal_session(&args[1..]),
         "title" => terminal_title(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -341,6 +397,43 @@ fn run_terminal_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn terminal_shell(args: &[String]) -> std::io::Result<i32> {
+    let label = match args {
+        [] => None,
+        [flag, value] if flag == "--label" && !value.is_empty() => Some(value.clone()),
+        _ => {
+            eprintln!("usage: herdr terminal shell [--label LABEL]");
+            return Ok(2);
+        }
+    };
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok());
+    let env = std::env::vars()
+        .filter(|(key, _)| !key.starts_with("HERDR_"))
+        .collect();
+    let response = send_request(&Request {
+        id: "cli:terminal:shell".into(),
+        method: Method::TabCreate(TabCreateParams {
+            workspace_id: None,
+            cwd,
+            focus: false,
+            label,
+            env,
+        }),
+    })?;
+    if response.get("error").is_some() {
+        eprintln!("{}", serde_json::to_string(&response).unwrap());
+        return Ok(1);
+    }
+    let Some(terminal_id) = response["result"]["root_pane"]["terminal_id"].as_str() else {
+        eprintln!("terminal shell failed: tab.create response did not include a terminal id");
+        return Ok(1);
+    };
+    crate::client::run_terminal_attach(terminal_id.to_string(), false)?;
+    Ok(0)
 }
 
 fn run_wait_command(args: &[String]) -> std::io::Result<i32> {
@@ -473,15 +566,323 @@ fn session_delete(args: &[String]) -> std::io::Result<i32> {
     }
 }
 
-fn terminal_attach(args: &[String]) -> std::io::Result<i32> {
-    let (terminal_id, takeover) = match parse_attach_target(
-        args,
-        "usage: herdr terminal attach <terminal_id> [--takeover]",
-    ) {
-        Ok(parsed) => parsed,
-        Err(code) => return Ok(code),
+#[cfg(not(unix))]
+fn run_ssh_command(args: &[String]) -> std::io::Result<i32> {
+    crate::ssh_integration::run_real_ssh_args(args)
+}
+
+#[cfg(unix)]
+fn run_ssh_command(args: &[String]) -> std::io::Result<i32> {
+    if !crate::ssh_integration::should_integrate_invocation() {
+        return crate::ssh_integration::run_real_ssh_args(args);
+    }
+    let Some(parsed) = crate::ssh_integration::parse_interactive_ssh_args(args) else {
+        return crate::ssh_integration::run_real_ssh_args(args);
     };
-    crate::client::run_terminal_attach(terminal_id, takeover)?;
+    if !crate::ssh_integration::preflight_interactive_ssh_args(args).unwrap_or(false) {
+        return crate::ssh_integration::run_real_ssh_args(args);
+    }
+
+    let mut managed = match crate::ssh_integration::prepare_managed_connection(
+        &parsed.target,
+        &parsed.ssh_args,
+    ) {
+        Ok(managed) => managed,
+        Err(err) => {
+            eprintln!("herdr ssh setup failed, falling back to ssh: {err}");
+            return crate::ssh_integration::run_real_ssh_args(args);
+        }
+    };
+    let managed_control_path = managed
+        .as_ref()
+        .map(crate::ssh_integration::ManagedSshConnection::control_path);
+
+    let owner_pane_id = std::env::var(crate::integration::HERDR_PANE_ID_ENV_VAR).ok();
+    let response = match send_request(&Request {
+        id: "cli:ssh:connect".into(),
+        method: Method::PeerConnectSsh(shim_peer_connect_params(
+            &parsed,
+            managed_control_path.clone(),
+            owner_pane_id.clone(),
+        )),
+    }) {
+        Ok(response) => response,
+        Err(err) => {
+            eprintln!("herdr ssh integration unavailable, falling back to ssh: {err}");
+            drop(managed.take());
+            return crate::ssh_integration::run_real_ssh_args(args);
+        }
+    };
+    if response.get("error").is_some() {
+        let message = response["error"]["message"]
+            .as_str()
+            .unwrap_or("ssh integration failed");
+        eprintln!("herdr ssh integration failed, falling back to ssh: {message}");
+        drop(managed.take());
+        return crate::ssh_integration::run_real_ssh_args(args);
+    }
+    let Some(peer_id) = response["result"]["peer"]["id"]
+        .as_str()
+        .map(str::to_string)
+    else {
+        eprintln!("herdr ssh integration returned no peer id, falling back to ssh");
+        drop(managed.take());
+        return crate::ssh_integration::run_real_ssh_args(args);
+    };
+    let Some(connection_id) = response["result"]["connection_id"]
+        .as_str()
+        .map(str::to_string)
+    else {
+        eprintln!("herdr ssh integration returned no connection id, falling back to ssh");
+        drop(managed.take());
+        return crate::ssh_integration::run_real_ssh_args(args);
+    };
+    let attach =
+        match serde_json::from_value::<AgentAttachInfo>(response["result"]["attach"].clone()) {
+            Ok(attach) => attach,
+            Err(err) => {
+                let _ = disconnect_ssh_peer(&peer_id, &connection_id, None);
+                eprintln!(
+                "herdr ssh integration returned invalid attach info, falling back to ssh: {err}"
+            );
+                drop(managed.take());
+                return crate::ssh_integration::run_real_ssh_args(args);
+            }
+        };
+    let Some(argv) = crate::remote_agent::attach_argv_for_agent_attach(&attach, false) else {
+        let _ = disconnect_ssh_peer(&peer_id, &connection_id, None);
+        eprintln!(
+            "herdr ssh integration returned an unsupported attach transport, falling back to ssh"
+        );
+        drop(managed.take());
+        return crate::ssh_integration::run_real_ssh_args(args);
+    };
+    if let Some(managed) = managed.take() {
+        let _ = managed.transfer();
+    }
+    let keepalive = SshPeerKeepalive::start(
+        peer_id.clone(),
+        connection_id.clone(),
+        parsed.target,
+        managed_control_path,
+    );
+    let result = crate::ssh_integration::run_ssh_argv(&argv);
+    let presentation_activated = crate::remote_agent::delegation_was_activated(&attach)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| result.as_ref().is_ok_and(|code| *code == 0));
+    if !presentation_activated {
+        let _ = crate::remote_agent::abandon_unactivated_delegation(&attach);
+    }
+    drop(keepalive);
+    let activated_delegation = if presentation_activated {
+        match &attach {
+            AgentAttachInfo::Ssh { delegation, .. } => delegation.clone(),
+            AgentAttachInfo::SshShell { .. } => None,
+        }
+    } else {
+        None
+    };
+    if let Err(err) = disconnect_ssh_peer(&peer_id, &connection_id, activated_delegation) {
+        eprintln!("warning: could not release Herdr SSH peer connection: {err}");
+    }
+    if presentation_activated {
+        if let Some(owner_pane_id) = owner_pane_id {
+            let _ = send_request(&Request {
+                id: "cli:ssh:close-owner-pane".into(),
+                method: Method::PaneClose(crate::api::schema::PaneTarget {
+                    pane_id: owner_pane_id,
+                }),
+            });
+        }
+    }
+    result
+}
+
+#[cfg(unix)]
+fn shim_peer_connect_params(
+    parsed: &crate::ssh_integration::ParsedSshInvocation,
+    managed_control_path: Option<String>,
+    owner_pane_id: Option<String>,
+) -> PeerConnectSshParams {
+    PeerConnectSshParams {
+        target: parsed.target.clone(),
+        ssh_args: parsed.ssh_args.clone(),
+        managed_control_path,
+        session: Some(explicit_remote_ssh_session(None)),
+        label: Some(parsed.target.clone()),
+        owner_pane_id,
+        owner: None,
+    }
+}
+
+fn explicit_remote_ssh_session(session: Option<String>) -> String {
+    session.unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string())
+}
+
+#[cfg(unix)]
+struct SshPeerKeepalive {
+    stop_tx: std::sync::mpsc::SyncSender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl SshPeerKeepalive {
+    fn start(
+        peer_id: String,
+        connection_id: String,
+        target: String,
+        managed_control_path: Option<String>,
+    ) -> Self {
+        let (stop_tx, stop_rx) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || loop {
+            match stop_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if managed_control_path.as_deref().is_some_and(|control_path| {
+                !crate::ssh_integration::managed_control_connection_is_alive(&target, control_path)
+            }) {
+                break;
+            }
+            let response = send_ssh_control_request(&Request {
+                id: "cli:ssh:keepalive".into(),
+                method: Method::PeerKeepaliveSsh(PeerKeepaliveSshParams {
+                    peer_id: peer_id.clone(),
+                    connection_id: connection_id.clone(),
+                }),
+            });
+            if ssh_keepalive_should_stop(&response) {
+                break;
+            }
+        });
+        Self {
+            stop_tx,
+            thread: Some(thread),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn ssh_keepalive_should_stop(response: &std::io::Result<serde_json::Value>) -> bool {
+    response
+        .as_ref()
+        .is_ok_and(|value| value.get("error").is_some())
+}
+
+#[cfg(unix)]
+impl Drop for SshPeerKeepalive {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.try_send(());
+        if let Some(thread) = self.thread.take() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while !thread.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if thread.is_finished() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn disconnect_ssh_peer(
+    peer_id: &str,
+    connection_id: &str,
+    activated_delegation: Option<crate::api::schema::TerminalDelegationClaim>,
+) -> std::io::Result<()> {
+    let response = send_ssh_control_request(&Request {
+        id: "cli:ssh:disconnect".into(),
+        method: Method::PeerDisconnectSsh(PeerDisconnectSshParams {
+            peer_id: peer_id.to_string(),
+            connection_id: connection_id.to_string(),
+            activated_delegation,
+        }),
+    })?;
+    if let Some(message) = response["error"]["message"].as_str() {
+        return Err(std::io::Error::other(message.to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn send_ssh_control_request(request: &Request) -> std::io::Result<serde_json::Value> {
+    ApiClient::local()
+        .request_value_with_timeout(request, std::time::Duration::from_secs(2))
+        .map_err(api_client_error_to_io)
+}
+
+fn terminal_attach(args: &[String]) -> std::io::Result<i32> {
+    let Some(terminal_id) = args
+        .first()
+        .filter(|value| !value.starts_with('-'))
+        .cloned()
+    else {
+        eprintln!("usage: herdr terminal attach <terminal_id> [--takeover]");
+        return Ok(2);
+    };
+    let mut takeover = false;
+    let mut delegation_id = None;
+    let mut delegation_epoch = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--takeover" => {
+                takeover = true;
+                index += 1;
+            }
+            "--delegation" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --delegation");
+                    return Ok(2);
+                };
+                delegation_id = Some(value.clone());
+                index += 2;
+            }
+            "--delegation-epoch" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --delegation-epoch");
+                    return Ok(2);
+                };
+                delegation_epoch = match value.parse::<u64>() {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        eprintln!("invalid value for --delegation-epoch: {value}");
+                        return Ok(2);
+                    }
+                };
+                index += 2;
+            }
+            _ => {
+                eprintln!("usage: herdr terminal attach <terminal_id> [--takeover]");
+                return Ok(2);
+            }
+        }
+    }
+    let delegation = match (delegation_id, delegation_epoch) {
+        (None, None) => None,
+        (Some(delegation_id), Some(epoch)) => Some(crate::api::schema::TerminalDelegationClaim {
+            delegation_id,
+            epoch,
+        }),
+        _ => {
+            eprintln!("--delegation and --delegation-epoch must be used together");
+            return Ok(2);
+        }
+    };
+    #[cfg(unix)]
+    crate::client::run_terminal_attach_with_delegation(terminal_id, takeover, delegation)?;
+    #[cfg(windows)]
+    {
+        if delegation.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "remote terminal delegation is not supported on Windows yet",
+            ));
+        }
+        crate::client::run_terminal_attach(terminal_id, takeover)?;
+    }
     Ok(0)
 }
 
@@ -1064,6 +1465,7 @@ fn print_config_help() {
 fn print_terminal_help() {
     eprintln!("herdr terminal commands:");
     eprintln!("  herdr terminal attach <terminal_id> [--takeover]");
+    eprintln!("  herdr terminal shell [--label LABEL]");
     eprintln!("  herdr terminal session control <target> [--takeover] [--cols N] [--rows N]");
     eprintln!("  herdr terminal session observe <target> [--cols N] [--rows N]");
     eprintln!("  herdr terminal title set <title>");
@@ -1170,5 +1572,50 @@ mod tests {
             super::parse_env_assignment("HERDR_ROLE").unwrap_err(),
             "env must use KEY=VALUE"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shim_ssh_uses_the_remote_default_session() {
+        let parsed = crate::ssh_integration::ParsedSshInvocation {
+            target: "workbox".to_string(),
+            ssh_args: vec!["-p".to_string(), "2222".to_string()],
+        };
+
+        let params = super::shim_peer_connect_params(&parsed, None, None);
+
+        assert_eq!(params.target, "workbox");
+        assert_eq!(params.ssh_args, ["-p", "2222"]);
+        assert_eq!(
+            params.session.as_deref(),
+            Some(crate::session::DEFAULT_SESSION_NAME)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_keepalive_retries_io_errors_but_stops_on_server_rejection() {
+        assert!(!super::ssh_keepalive_should_stop(&Ok(serde_json::json!({
+            "result": {}
+        }))));
+        assert!(!super::ssh_keepalive_should_stop(&Err(
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "temporary timeout")
+        )));
+        assert!(super::ssh_keepalive_should_stop(&Ok(serde_json::json!({
+            "error": {"message": "connection is gone"}
+        }))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_ssh_arguments_bypass_managed_interception() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let args = vec![
+            std::ffi::OsString::from("workbox"),
+            std::ffi::OsString::from_vec(vec![b'-', b'F', 0xff]),
+        ];
+
+        assert!(super::ssh_os_args_as_utf8(&args).is_none());
     }
 }

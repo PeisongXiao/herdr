@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::api::schema::{
-    AgentReadParams, AgentRenameParams, AgentSendParams, AgentStartParams, AgentStatus,
-    AgentTarget, EmptyParams, Method, ReadFormat, ReadSource, Request, Subscription,
+    AgentAttachInfo, AgentListParams, AgentReadParams, AgentRenameParams, AgentSendParams,
+    AgentStartParams, AgentStartTransport, AgentStatus, AgentTarget, Method, ReadFormat,
+    ReadSource, Request, Subscription,
 };
 
 pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
@@ -269,12 +271,12 @@ fn matched_rule_region_preview<'a>(
 
 fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let Some(name) = args.first() else {
-        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>");
+        eprintln!("usage: herdr agent start <name> [--agent AGENT] [--peer PEER] [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] [--ssh TARGET] [--ssh-session NAME] [--no-remote-integration] -- <argv...>");
         return Ok(2);
     };
 
     let Some(separator) = args.iter().position(|arg| arg == "--") else {
-        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>");
+        eprintln!("usage: herdr agent start <name> [--agent AGENT] [--peer PEER] [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] [--ssh TARGET] [--ssh-session NAME] [--no-remote-integration] -- <argv...>");
         return Ok(2);
     };
     if separator == args.len() - 1 {
@@ -283,15 +285,36 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     }
 
     let mut cwd = None;
+    let mut peer = None;
+    let mut agent = None;
     let mut workspace_id = None;
     let mut tab_id = None;
     let mut split = None;
     let mut focus = false;
     let mut env = HashMap::new();
+    let mut ssh_target = None;
+    let mut ssh_session = None;
+    let mut prepare_remote_integration = true;
 
     let mut index = 1;
     while index < separator {
         match args[index].as_str() {
+            "--agent" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --agent");
+                    return Ok(2);
+                };
+                agent = Some(value.clone());
+                index += 2;
+            }
+            "--peer" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --peer");
+                    return Ok(2);
+                };
+                peer = Some(value.clone());
+                index += 2;
+            }
             "--cwd" => {
                 let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
                     eprintln!("missing value for --cwd");
@@ -332,6 +355,34 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                 focus = false;
                 index += 1;
             }
+            "--ssh" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --ssh");
+                    return Ok(2);
+                };
+                if value.starts_with('-') {
+                    eprintln!("--ssh target must not start with '-'");
+                    return Ok(2);
+                }
+                ssh_target = Some(value.clone());
+                index += 2;
+            }
+            "--ssh-session" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --ssh-session");
+                    return Ok(2);
+                };
+                if let Err(message) = crate::session::validate_name(value) {
+                    eprintln!("invalid --ssh-session: {message}");
+                    return Ok(2);
+                }
+                ssh_session = Some(value.clone());
+                index += 2;
+            }
+            "--no-remote-integration" => {
+                prepare_remote_integration = false;
+                index += 1;
+            }
             "--env" => {
                 let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
                     eprintln!("missing value for --env");
@@ -353,11 +404,73 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             }
         }
     }
+    if ssh_session.is_some() && ssh_target.is_none() {
+        eprintln!("--ssh-session requires --ssh");
+        return Ok(2);
+    }
+    if peer.is_some() && ssh_target.is_some() {
+        eprintln!("--peer and --ssh are mutually exclusive");
+        return Ok(2);
+    }
+    #[cfg(not(unix))]
+    if ssh_target.is_some() {
+        eprintln!("direct SSH agent sessions are only supported on Unix");
+        return Ok(1);
+    }
+    #[cfg(unix)]
+    if ssh_target.is_some() {
+        if let Err(message) = crate::remote_agent::validate_remote_agent_selection(
+            agent.as_deref(),
+            &args[separator + 1..],
+            prepare_remote_integration,
+        ) {
+            eprintln!("invalid remote agent request: {message}");
+            return Ok(2);
+        }
+    }
 
-    super::print_response(&super::send_request(&Request {
+    let mut managed = None;
+    let transport = if let Some(target) = ssh_target {
+        match crate::ssh_integration::preflight_interactive_ssh_args(std::slice::from_ref(&target))
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!(
+                    "remote SSH setup refused: the target's effective SSH configuration changes interactive session semantics; remove or override remote commands, local commands, forwarding, StdinNull, SessionType, backgrounding, or tunnels for this host"
+                );
+                return Ok(1);
+            }
+            Err(err) => {
+                eprintln!("remote SSH setup could not validate effective SSH configuration: {err}");
+                return Ok(1);
+            }
+        }
+        managed = match crate::ssh_integration::prepare_managed_connection(&target, &[]) {
+            Ok(managed) => managed,
+            Err(err) => {
+                eprintln!("remote SSH setup failed: {err}");
+                return Ok(1);
+            }
+        };
+        Some(AgentStartTransport::Ssh {
+            target,
+            ssh_args: Vec::new(),
+            managed_control_path: managed
+                .as_ref()
+                .map(crate::ssh_integration::ManagedSshConnection::control_path),
+            session: Some(super::explicit_remote_ssh_session(ssh_session)),
+            prepare_integration: prepare_remote_integration,
+        })
+    } else {
+        None
+    };
+
+    let response = super::send_request(&Request {
         id: "cli:agent:start".into(),
         method: Method::AgentStart(AgentStartParams {
             name: name.clone(),
+            peer,
+            agent,
             cwd,
             workspace_id,
             tab_id,
@@ -365,8 +478,15 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             focus,
             argv: args[separator + 1..].to_vec(),
             env,
+            transport,
         }),
-    })?)
+    })?;
+    if response.get("error").is_none() {
+        if let Some(managed) = managed.take() {
+            let _ = managed.transfer();
+        }
+    }
+    super::print_response(&response)
 }
 
 fn agent_list(args: &[String]) -> std::io::Result<i32> {
@@ -377,7 +497,9 @@ fn agent_list(args: &[String]) -> std::io::Result<i32> {
 
     super::print_response(&super::send_request(&Request {
         id: "cli:agent:list".into(),
-        method: Method::AgentList(EmptyParams::default()),
+        method: Method::AgentList(AgentListParams {
+            include_peers: true,
+        }),
     })?)
 }
 
@@ -429,12 +551,90 @@ fn agent_attach(args: &[String]) -> std::io::Result<i32> {
         eprintln!("{}", serde_json::to_string(&response).unwrap());
         return Ok(1);
     }
-    let Some(terminal_id) = response["result"]["agent"]["terminal_id"].as_str() else {
+    let agent = &response["result"]["agent"];
+    if agent["peer"].as_str().is_some() {
+        let Some(owner_pane_id) = std::env::var(crate::integration::HERDR_PANE_ID_ENV_VAR)
+            .ok()
+            .filter(|pane_id| !pane_id.is_empty())
+        else {
+            eprintln!("agent attach to a peer must be run inside the owning Herdr pane");
+            return Ok(1);
+        };
+        let prepared = super::send_request(&Request {
+            id: "cli:agent:attach:prepare".into(),
+            method: Method::AgentAttachPrepare(crate::api::schema::AgentAttachPrepareParams {
+                target: target.clone(),
+                owner_pane_id: owner_pane_id.clone(),
+                takeover,
+            }),
+        })?;
+        if prepared.get("error").is_some() {
+            eprintln!("{}", serde_json::to_string(&prepared).unwrap());
+            return Ok(1);
+        }
+        let attach = match serde_json::from_value::<AgentAttachInfo>(
+            prepared["result"]["prepared"]["attach"].clone(),
+        ) {
+            Ok(attach) => attach,
+            Err(err) => {
+                eprintln!("agent attach failed: invalid prepared attach response: {err}");
+                return Ok(1);
+            }
+        };
+        let outcome = attach_agent_terminal(attach, takeover)?;
+        if outcome.presentation_activated {
+            let _ = super::send_request(&Request {
+                id: "cli:agent:attach:close-owner-pane".into(),
+                method: Method::PaneClose(crate::api::schema::PaneTarget {
+                    pane_id: owner_pane_id,
+                }),
+            });
+        }
+        return Ok(outcome.exit_code);
+    }
+    if let Ok(attach) = serde_json::from_value::<AgentAttachInfo>(agent["attach"].clone()) {
+        return attach_agent_terminal(attach, takeover).map(|outcome| outcome.exit_code);
+    }
+    let Some(terminal_id) = agent["terminal_id"].as_str() else {
         eprintln!("agent attach failed: response did not include terminal_id");
         return Ok(1);
     };
     crate::client::run_terminal_attach(terminal_id.to_owned(), takeover)?;
     Ok(0)
+}
+
+struct RemoteAttachOutcome {
+    exit_code: i32,
+    presentation_activated: bool,
+}
+
+fn attach_agent_terminal(
+    attach: AgentAttachInfo,
+    takeover: bool,
+) -> std::io::Result<RemoteAttachOutcome> {
+    let Some(argv) = crate::remote_agent::attach_argv_for_agent_attach(&attach, takeover) else {
+        eprintln!("agent attach failed: unsupported peer attach transport");
+        return Ok(RemoteAttachOutcome {
+            exit_code: 1,
+            presentation_activated: false,
+        });
+    };
+    let result = match &attach {
+        AgentAttachInfo::Ssh { .. } | AgentAttachInfo::SshShell { .. } => {
+            crate::ssh_integration::run_ssh_argv(&argv)
+        }
+    };
+    let presentation_activated = crate::remote_agent::delegation_was_activated(&attach)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| result.as_ref().is_ok_and(|code| *code == 0));
+    if !presentation_activated {
+        let _ = crate::remote_agent::abandon_unactivated_delegation(&attach);
+    }
+    Ok(RemoteAttachOutcome {
+        exit_code: result?,
+        presentation_activated,
+    })
 }
 
 fn agent_wait(args: &[String]) -> std::io::Result<i32> {
@@ -494,6 +694,10 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
         return Ok(0);
     }
 
+    if response["result"]["agent"]["peer"].as_str().is_some() {
+        return poll_agent_status(target, agent_status, timeout_ms);
+    }
+
     let Some(pane_id) = response["result"]["agent"]["pane_id"].as_str() else {
         eprintln!("agent wait failed: response did not include pane_id");
         return Ok(1);
@@ -527,6 +731,33 @@ fn agent_wait(args: &[String]) -> std::io::Result<i32> {
         timeout_ms,
         "timed out waiting for agent status change",
     )
+}
+
+fn poll_agent_status(
+    target: &str,
+    desired_status: AgentStatus,
+    timeout_ms: Option<u64>,
+) -> std::io::Result<i32> {
+    let deadline = timeout_ms.map(|millis| Instant::now() + Duration::from_millis(millis));
+    loop {
+        let response = resolve_agent_target(target, "cli:agent:wait:poll")?;
+        if response.get("error").is_some() {
+            eprintln!("{}", serde_json::to_string(&response).unwrap());
+            return Ok(1);
+        }
+        if response["result"]["agent"]["agent_status"]
+            .as_str()
+            .is_some_and(|current| agent_wait_status_satisfied(desired_status, current))
+        {
+            println!("{}", serde_json::to_string(&response).unwrap());
+            return Ok(0);
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            eprintln!("timed out waiting for agent status change");
+            return Ok(1);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn resolve_agent_target(target: &str, request_id: &str) -> std::io::Result<serde_json::Value> {
@@ -675,10 +906,10 @@ fn print_agent_help() {
     eprintln!("  herdr agent focus <target>");
     eprintln!("  herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]");
     eprintln!("  herdr agent attach <target> [--takeover]");
-    eprintln!("  herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>");
+    eprintln!("  herdr agent start <name> [--agent AGENT] [--peer PEER] [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] [--ssh TARGET] [--ssh-session NAME] [--no-remote-integration] -- <argv...>");
     eprintln!("  herdr agent explain <target> [--json]");
     eprintln!("  herdr agent explain --file PATH --agent LABEL [--json]");
-    eprintln!("  targets accept terminal ids, unique agent names, detected/reported agent labels, and legacy pane ids");
+    eprintln!("  targets accept terminal ids, unique agent names, detected/reported agent labels, peer::target, and legacy pane ids");
     eprintln!(
         "  agent send writes literal text; use pane run when you want command text plus Enter"
     );

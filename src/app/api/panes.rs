@@ -1202,7 +1202,7 @@ impl App {
         id: String,
         params: PaneReportAgentParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some(pane_id) = self.resolve_internal_report_pane(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
@@ -1224,7 +1224,12 @@ impl App {
             seq: params.seq,
         });
 
-        encode_success(id, ResponseResult::Ok {})
+        encode_success(
+            id,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            },
+        )
     }
 
     pub(super) fn handle_pane_report_agent_session(
@@ -1232,7 +1237,7 @@ impl App {
         id: String,
         params: PaneReportAgentSessionParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some(pane_id) = self.resolve_internal_report_pane(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
@@ -1254,7 +1259,12 @@ impl App {
             ),
         });
 
-        encode_success(id, ResponseResult::Ok {})
+        encode_success(
+            id,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            },
+        )
     }
 
     pub(super) fn handle_pane_report_metadata(
@@ -1262,7 +1272,7 @@ impl App {
         id: String,
         params: PaneReportMetadataParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some(pane_id) = self.resolve_internal_report_pane(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let agent_label = match params.agent.as_deref() {
@@ -1347,7 +1357,12 @@ impl App {
             ttl,
         });
 
-        encode_success(id, ResponseResult::Ok {})
+        encode_success(
+            id,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            },
+        )
     }
 
     pub(super) fn handle_pane_clear_agent_authority(
@@ -1355,7 +1370,7 @@ impl App {
         id: String,
         params: PaneClearAgentAuthorityParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some(pane_id) = self.resolve_internal_report_pane(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         self.handle_internal_event(crate::events::AppEvent::HookAuthorityCleared {
@@ -1364,7 +1379,12 @@ impl App {
             seq: params.seq,
         });
 
-        encode_success(id, ResponseResult::Ok {})
+        encode_success(
+            id,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            },
+        )
     }
 
     pub(super) fn handle_pane_release_agent(
@@ -1372,7 +1392,7 @@ impl App {
         id: String,
         params: PaneReleaseAgentParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some(pane_id) = self.resolve_internal_report_pane(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
@@ -1386,7 +1406,12 @@ impl App {
             seq: params.seq,
         });
 
-        encode_success(id, ResponseResult::Ok {})
+        encode_success(
+            id,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            },
+        )
     }
 
     pub(super) fn handle_pane_send_text(
@@ -1404,7 +1429,12 @@ impl App {
             return encode_error(id, "pane_send_failed", err.to_string());
         }
 
-        encode_success(id, ResponseResult::Ok {})
+        encode_success(
+            id,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            },
+        )
     }
 
     pub(super) fn handle_pane_send_input(
@@ -1434,18 +1464,38 @@ impl App {
             }
         }
 
-        encode_success(id, ResponseResult::Ok {})
+        encode_success(
+            id,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            },
+        )
     }
 
     pub(super) fn handle_pane_close(&mut self, id: String, target: PaneTarget) -> String {
         match self.close_pane(id.clone(), &target) {
-            Ok(()) => encode_success(id, ResponseResult::Ok {}),
+            Ok(()) => encode_success(
+                id,
+                ResponseResult::Ok {
+                    terminated_remote_presentations: None,
+                },
+            ),
             Err(response) => response,
         }
     }
 
     /// Close a pane; `Err` carries the encoded error response.
     pub(super) fn close_pane(&mut self, id: String, target: &PaneTarget) -> Result<(), String> {
+        if let Some((delegation_id, epoch)) = self
+            .delegated_pane_for_public_id(&target.pane_id)
+            .map(|delegated| (delegated.info.delegation_id.clone(), delegated.info.epoch))
+        {
+            self.terminate_terminal_delegation(&crate::api::schema::TerminalDelegationClaim {
+                delegation_id,
+                epoch,
+            });
+            return Ok(());
+        }
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
             return Err(pane_not_found(id, &target.pane_id));
         };
@@ -1453,6 +1503,18 @@ impl App {
             return Err(pane_not_found(id, &target.pane_id));
         };
         let workspace_id = self.public_workspace_id(ws_idx);
+        let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
+        let closes_remote_owner = terminal_id.as_ref().is_some_and(|terminal_id| {
+            self.remote_owner_presentations.contains_key(terminal_id)
+                || self
+                    .pending_owner_activations
+                    .values()
+                    .any(|pending| &pending.terminal_id == terminal_id)
+        });
+        if closes_remote_owner {
+            self.shutdown_outbound_owner_terminals(terminal_id.iter().cloned().collect());
+            return Ok(());
+        }
         if self.state.close_pane_would_close_workspace(ws_idx, pane_id)
             && self.state.confirm_implicit_worktree_group_close(ws_idx)
         {
@@ -1463,7 +1525,6 @@ impl App {
             ));
         }
         let workspace_snapshot = self.workspace_info(ws_idx);
-        let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return Err(pane_not_found(id, &target.pane_id));
@@ -1526,7 +1587,12 @@ impl App {
             }
         }
 
-        encode_success(id, ResponseResult::Ok {})
+        encode_success(
+            id,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            },
+        )
     }
 }
 
@@ -1868,7 +1934,12 @@ mod tests {
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
-        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(
+            success.result,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            }
+        );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x08]));
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0a]));
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0b]));
@@ -1890,7 +1961,12 @@ mod tests {
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
-        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(
+            success.result,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            }
+        );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x03]));
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x03]));
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x03]));
@@ -1911,7 +1987,12 @@ mod tests {
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
-        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(
+            success.result,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            }
+        );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"+"));
         assert!(rx.try_recv().is_err());
     }
@@ -1931,7 +2012,12 @@ mod tests {
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
-        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(
+            success.result,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            }
+        );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0a]));
         assert!(rx.try_recv().is_err());
     }

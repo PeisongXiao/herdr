@@ -1,47 +1,64 @@
 use clap::{Arg, ArgAction, Command, ValueHint};
 
 pub(super) fn command() -> Command {
-    let command = Command::new("herdr")
-        .about("terminal workspace manager for AI coding agents")
-        .disable_help_flag(true)
-        .disable_version_flag(true)
-        .arg(help_flag())
-        .arg(flag("no-session").help("Run monolithically without server/client session mode"))
-        .arg(option("session", "NAME").help("Use or create a named persistent session"))
-        .arg(option("remote", "TARGET").help("Attach through SSH to a remote Herdr server"))
-        .arg(
-            option("remote-keybindings", "MODE")
-                .value_parser(["local", "server"])
-                .help("Choose local or server keybindings for remote attach"),
-        )
-        .arg(flag("handoff").help("Opt into live handoff for update or remote attach"))
-        .arg(flag("default-config").help("Print default configuration and exit"))
-        .arg(
-            Arg::new("version")
-                .short('V')
-                .long("version")
-                .action(ArgAction::SetTrue)
-                .help("Print version and exit"),
-        )
-        .subcommand(completion_command())
-        .subcommand(update_command())
-        .subcommand(status_command())
-        .subcommand(config_command())
-        .subcommand(channel_command())
-        .subcommand(server_command())
-        .subcommand(api_command())
-        .subcommand(workspace_command())
-        .subcommand(worktree_command())
-        .subcommand(tab_command())
-        .subcommand(notification_command())
-        .subcommand(agent_command())
-        .subcommand(pane_command())
-        .subcommand(wait_command())
-        .subcommand(terminal_command())
-        .subcommand(session_command())
-        .subcommand(integration_command())
-        .subcommand(plugin_command());
+    let command =
+        Command::new("herdr")
+            .about("terminal workspace manager for AI coding agents")
+            .disable_help_flag(true)
+            .disable_version_flag(true)
+            .arg(help_flag())
+            .arg(flag("no-session").help("Run monolithically without server/client session mode"))
+            .arg(option("session", "NAME").help("Use or create a named persistent session"))
+            .arg(option("remote", "TARGET").help("Attach through SSH to a remote Herdr server"))
+            .arg(
+                option("remote-keybindings", "MODE")
+                    .value_parser(["local", "server"])
+                    .help("Choose local or server keybindings for remote attach"),
+            )
+            .arg(flag("handoff").help("Opt into live handoff for update or remote attach"))
+            .arg(flag("default-config").help("Print default configuration and exit"))
+            .arg(
+                Arg::new("version")
+                    .short('V')
+                    .long("version")
+                    .action(ArgAction::SetTrue)
+                    .help("Print version and exit"),
+            )
+            .subcommand(completion_command())
+            .subcommand(update_command())
+            .subcommand(status_command())
+            .subcommand(config_command())
+            .subcommand(channel_command())
+            .subcommand(server_command())
+            .subcommand(api_command())
+            .subcommand(workspace_command())
+            .subcommand(worktree_command())
+            .subcommand(tab_command())
+            .subcommand(notification_command())
+            .subcommand(agent_command())
+            .subcommand(ssh_command())
+            .subcommand(Command::new("remote-handoff").about(
+                "Move the remote pane containing the cursor into a new workspace on its host",
+            ))
+            .subcommand(pane_command())
+            .subcommand(peer_command())
+            .subcommand(wait_command())
+            .subcommand(terminal_command())
+            .subcommand(session_command())
+            .subcommand(integration_command())
+            .subcommand(plugin_command());
     disable_auto_help(command)
+}
+
+fn ssh_command() -> Command {
+    Command::new("ssh")
+        .about("Run Herdr-integrated interactive ssh")
+        .arg(
+            Arg::new("args")
+                .value_name("SSH_ARGS")
+                .num_args(0..)
+                .trailing_var_arg(true),
+        )
 }
 
 fn disable_auto_help(command: Command) -> Command {
@@ -108,6 +125,11 @@ fn channel_command() -> Command {
 fn server_command() -> Command {
     Command::new("server")
         .about("Run or control the headless server")
+        .subcommand(
+            Command::new("ensure")
+                .about("Start the background server if needed")
+                .arg(json_flag()),
+        )
         .subcommand(Command::new("stop").about("Stop the running server"))
         .subcommand(Command::new("reload-config").about("Reload config in the running server"))
         .subcommand(
@@ -129,6 +151,7 @@ fn server_command() -> Command {
 fn api_command() -> Command {
     Command::new("api")
         .about("Inspect socket API metadata")
+        .subcommand(Command::new("bridge").about("Bridge one JSON API request over stdio"))
         .subcommand(
             Command::new("schema")
                 .about("Print or write the bundled API schema")
@@ -297,13 +320,18 @@ fn agent_command() -> Command {
             Command::new("start")
                 .about("Start an agent command")
                 .arg(required("name", "NAME"))
+                .arg(option("agent", "AGENT"))
                 .arg(path_option("cwd", "PATH"))
                 .arg(option("workspace", "ID"))
                 .arg(option("tab", "ID"))
                 .arg(split_option())
                 .arg(env_option())
                 .arg(flag("focus"))
-                .arg(flag("no-focus")),
+                .arg(flag("no-focus"))
+                .arg(option("peer", "PEER"))
+                .arg(option("ssh", "TARGET"))
+                .arg(option("ssh-session", "NAME"))
+                .arg(flag("no-remote-integration")),
         )
         .subcommand(
             Command::new("explain")
@@ -319,6 +347,22 @@ fn agent_command() -> Command {
                         .long("verbose")
                         .action(ArgAction::SetTrue),
                 ),
+        )
+}
+
+fn peer_command() -> Command {
+    Command::new("peer")
+        .about("Inspect Herdr peer connections")
+        .subcommand(Command::new("list").about("List registered peers"))
+        .subcommand(
+            Command::new("health")
+                .about("Check peer reachability")
+                .arg(required("peer_id", "PEER_ID")),
+        )
+        .subcommand(
+            Command::new("unregister")
+                .about("Remove a peer")
+                .arg(required("peer_id", "PEER_ID")),
         )
 }
 
@@ -537,6 +581,11 @@ fn wait_command() -> Command {
 fn terminal_command() -> Command {
     Command::new("terminal")
         .about("Attach to or observe raw terminal streams")
+        .subcommand(
+            Command::new("shell")
+                .about("Create and attach to a server-owned shell")
+                .arg(option("label", "LABEL")),
+        )
         .subcommand(
             Command::new("attach")
                 .about("Attach directly to a terminal stream")
@@ -945,6 +994,18 @@ mod tests {
         assert!(!agent_start
             .get_arguments()
             .any(|arg| arg.get_id() == "argv"));
+    }
+
+    #[test]
+    fn spec_places_server_owned_shell_under_terminal() {
+        let cmd = super::command();
+        let terminal_shell = command_path(&cmd, &["terminal", "shell"]);
+        assert!(has_option(terminal_shell, "label"));
+
+        let agent = command_path(&cmd, &["agent"]);
+        assert!(!agent
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == "shell"));
     }
 
     #[test]

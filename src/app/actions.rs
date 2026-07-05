@@ -2386,6 +2386,11 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::PeerAgentsRefreshed { .. }
+            | AppEvent::PeerConnectSshFinished(_)
+            | AppEvent::RemoteAgentStartFinished(_)
+            | AppEvent::PeerAgentRequestFinished(_)
+            | AppEvent::PeerHealthRequestFinished(_) => Vec::new(),
             AppEvent::StateChanged {
                 pane_id,
                 agent,
@@ -2524,6 +2529,9 @@ impl AppState {
             // Intercepted in App::handle_internal_event before reaching this
             // dispatch; never touches AppState.
             AppEvent::ClipboardWrite { .. } => Vec::new(),
+            AppEvent::RemotePresentationActivationObserved { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::RemoteAgentInfoMirrored { .. } => Vec::new(),
             AppEvent::TerminalCwdReported { pane_id, cwd } => {
                 if !cwd.is_absolute() || !cwd.is_dir() {
                     return Vec::new();
@@ -2564,7 +2572,28 @@ impl AppState {
         let ws_idx = self
             .workspaces
             .iter()
-            .position(|ws| ws.pane_state(pane_id).is_some())?;
+            .position(|ws| ws.pane_state(pane_id).is_some());
+        if ws_idx.is_none() {
+            let terminal_id = self.delegated_terminal_ids.get(&pane_id)?.clone();
+            let mutation = {
+                let terminal = self.terminals.get_mut(&terminal_id)?;
+                update(terminal)?
+            };
+            if mutation.session_ref_changed {
+                self.mark_session_dirty();
+            }
+            if let Some(change) = mutation.effective_state_change {
+                if change.previous_state != change.state {
+                    self.next_agent_state_change_seq += 1;
+                    if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+                        terminal.last_agent_state_change_seq =
+                            Some(self.next_agent_state_change_seq);
+                    }
+                }
+            }
+            return None;
+        }
+        let ws_idx = ws_idx?;
         let terminal_id = self.workspaces[ws_idx]
             .pane_state(pane_id)?
             .attached_terminal_id

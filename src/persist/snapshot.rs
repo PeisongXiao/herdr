@@ -323,22 +323,43 @@ fn capture_tab(
             .panes
             .get(id)
             .and_then(|pane| terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.manual_label.clone());
+            .and_then(|terminal| {
+                if terminal.remote_agent_transport.is_some() {
+                    None
+                } else {
+                    terminal.manual_label.clone()
+                }
+            });
         let agent_name = tab
             .panes
             .get(id)
             .and_then(|pane| terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.agent_name.clone());
+            .and_then(|terminal| {
+                if terminal.remote_agent_transport.is_some() {
+                    None
+                } else {
+                    terminal.agent_name.clone()
+                }
+            });
         let launch_argv = tab
             .panes
             .get(id)
             .and_then(|pane| terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.launch_argv.clone());
+            .and_then(|terminal| {
+                if terminal.remote_agent_transport.is_some() {
+                    None
+                } else {
+                    terminal.launch_argv.clone()
+                }
+            });
         let agent_session =
             tab.panes
                 .get(id)
                 .and_then(|pane| terminals.get(&pane.attached_terminal_id))
                 .and_then(|terminal| {
+                    if terminal.remote_agent_transport.is_some() {
+                        return None;
+                    }
                     if let Some(authority) = terminal.hook_authority.as_ref() {
                         if let Some(session_ref) = authority.session_ref.as_ref() {
                             return Some(PaneAgentSessionSnapshot {
@@ -1104,18 +1125,17 @@ mod tests {
         let terminal_id = state.workspaces[0].tabs[0].panes[&root]
             .attached_terminal_id
             .clone();
-        state
-            .terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-                source: "herdr:opencode".into(),
-                agent: "opencode".into(),
-                session_ref: crate::agent_resume::AgentSessionRef::id("opencode-session").unwrap(),
-            });
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:opencode".into(),
+            agent: "opencode".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("opencode-session").unwrap(),
+        });
+        terminal.launch_argv = Some(vec!["opencode".into(), "--session".into()]);
 
         let snapshot = capture_from_state(&state);
-        let agent_session = snapshot.workspaces[0].tabs[0].panes[&root.raw()]
+        let pane = &snapshot.workspaces[0].tabs[0].panes[&root.raw()];
+        let agent_session = pane
             .agent_session
             .as_ref()
             .expect("persisted agent session should be captured");
@@ -1127,6 +1147,61 @@ mod tests {
             crate::agent_resume::AgentSessionRefKind::Id
         );
         assert_eq!(agent_session.value, "opencode-session");
+        assert_eq!(
+            pane.launch_argv.as_deref(),
+            Some(["opencode".to_string(), "--session".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn remote_mirror_snapshot_round_trip_drops_identity_and_runtime_state() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_manual_label("stale remote label".into());
+        terminal.set_agent_name("stale-remote-agent".into());
+        terminal.launch_argv = Some(vec![
+            "ssh".into(),
+            "remote.example".into(),
+            "herdr agent attach remote-terminal".into(),
+        ]);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("remote-session").unwrap(),
+        });
+        terminal.remote_agent_transport = Some(crate::api::schema::AgentTransportInfo::Ssh {
+            target: "remote.example".into(),
+            ssh_args: vec!["-p".into(), "2222".into()],
+            managed_control_path: Some("/tmp/herdr-control".into()),
+            session: Some("remote-session".into()),
+            remote_terminal_id: "remote-terminal".into(),
+            remote_pane_id: "remote-pane".into(),
+            remote_agent: Some("codex".into()),
+            remote_cwd: Some("/remote/worktree".into()),
+        });
+
+        let snapshot = capture_from_state(&state);
+        let pane = &snapshot.workspaces[0].tabs[0].panes[&root.raw()];
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let restored = parse_snapshot(&encoded).unwrap();
+        let restored_pane = &restored.workspaces[0].tabs[0].panes[&root.raw()];
+
+        assert!(pane.label.is_none());
+        assert!(pane.agent_name.is_none());
+        assert!(pane.agent_session.is_none());
+        assert!(pane.launch_argv.is_none());
+        assert!(restored_pane.label.is_none());
+        assert!(restored_pane.agent_name.is_none());
+        assert!(restored_pane.agent_session.is_none());
+        assert!(restored_pane.launch_argv.is_none());
+        assert!(!encoded.contains("stale remote label"));
+        assert!(!encoded.contains("stale-remote-agent"));
+        assert!(!encoded.contains("remote.example"));
+        assert!(!encoded.contains("remote-terminal"));
     }
 
     #[test]

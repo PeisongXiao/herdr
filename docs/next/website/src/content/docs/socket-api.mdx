@@ -33,6 +33,11 @@ Schema document for tools, and `--output PATH` writes that document to a file.
 The schema covers raw requests, success responses, error responses, emitted
 events, and subscription events.
 
+For authenticated SSH commands, `herdr api bridge` reads an initial JSON
+request from stdin, forwards it to the local full API socket, and streams the
+response to stdout. Federation uses this helper for setup and remote-agent
+status projection. The long-lived peer link does not expose the full API socket.
+
 ## What you can control
 
 The socket API can:
@@ -41,6 +46,8 @@ The socket API can:
 - create, list, focus, rename, and close tabs
 - list, inspect, split, swap, focus, resize, rename, read, close, and send input to panes
 - list, inspect, read, send to, rename, focus, start, and attach agents through CLI helpers
+- start and exclusively present an agent through an SSH transport by passing `{"transport":{"type":"ssh","target":"host","session":"default"}}` to `agent.start`
+- connect an interactive SSH peer shell with `peer.connect_ssh`, delegate its pane to one presentation owner, and register, list, release, unregister, or health-check the runtime peer link
 - report custom agent state from hooks and plugins
 - subscribe to events and wait for output or state changes
 - install and uninstall built-in integrations
@@ -105,12 +112,31 @@ Raw socket method names use dot notation:
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start`, `agent.attach.prepare` |
+| Terminal delegation | `terminal.delegate.create`, `terminal.delegate.claim`, `terminal.delegate.status`, `terminal.delegate.terminate`, `terminal.delegate.handoff` |
+| Peer | `peer.register`, `peer.connect_ssh`, `peer.keepalive_ssh`, `peer.disconnect_ssh`, `peer.presentation.activate`, `peer.unregister`, `peer.list`, `peer.health` |
+| Peer agent | `peer.agent.list`, `peer.agent.get`, `peer.agent.read`, `peer.agent.explain`, `peer.agent.send`, `peer.agent.rename`, `peer.agent.start` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
 
-Some CLI commands are conveniences around these methods. For example, `herdr agent wait` resolves an agent target and then subscribes to pane agent state events.
+Some CLI commands are conveniences around these methods. For example, `herdr agent wait` resolves an agent target and then subscribes to pane agent state events or polls a peer target.
+
+The socket API keeps an omitted `include_peers` field local-only for compatibility. Pass `{"include_peers":true}` to include reachable registered peers; the `herdr agent list` CLI does this explicitly. Peer-aware agent targets use `peer::target`. The server translates supported agent operations to the corresponding `peer.agent.*` method, preventing recursive forwarding through a peer.
+
+`peer.connect_ssh` is the server-side half of pane `ssh TARGET` integration. It ensures that a compatible remote Herdr daemon is reachable, requires matching protocol plus advertised `peer_federation` and `remote_presentation` capabilities, registers both runtime peers, starts a reverse SSH forwarding bridge to the restricted peer socket, and prepares a new remote terminal for exclusive delegation. The response contains a connection id and attach data carrying the delegation claim. The built-in pane wrapper and `agent start --ssh` pass `session: "default"` explicitly, preventing inherited or SSH-accepted Herdr session and socket variables from redirecting remote commands. The server also normalizes an omitted or empty API session to `default`; pass a non-empty name only when a named remote session is intended. The server rejects effective SSH config that changes interactive session semantics before starting managed federation work, including for direct `agent.start` and `peer.connect_ssh` API requests.
+
+The caller identifies the presentation owner with `owner_pane_id`; nested calls inherit the existing `owner` and extend its route instead of creating another presentation. The remote terminal is removed from its host workspace when the terminal-stream client atomically commits the claim, so the pane appears in a workspace on exactly one machine. `agent.attach.prepare` uses `terminal.delegate.claim` for an existing peer agent. A claim against an already presented pane fails unless `takeover` is true; takeover replaces the previous owner rather than duplicating the pane. A pane that currently owns a deeper remote presentation must hand back or close that deeper presentation before it can itself be taken over.
+
+The owner must renew a pane connection with `peer.keepalive_ssh`; the built-in wrapper does so every three seconds. The server expires an unrenewed wrapper connection after 15 seconds, and the CLI calls `peer.disconnect_ssh` when the attach exits normally. A prepared connection is non-destructive until the remote attach is observed as active, so cancellation during setup preserves the local pane. A peer-agent attach reuses the peer for routing but receives a separate 15-second owner-presentation lease renewed by successful mirror snapshots; closing that owner never removes an unrelated shared bridge. The delegated attach is destructive after activation: disconnect, owner-pane closure, owner-lease expiry, or owner-server stop terminates the remote terminal unless `terminal.delegate.handoff` has already restored it to a new workspace on its host. An incoming reverse `peer.register` has a separate 15-second lease, renewed only by a successful metadata refresh. Origin crashes and network loss therefore remove ghost peers and terminate presentations whose ownership route crossed the expired peer. Every bridge conditionally unregisters only when the current remote registration still names its own forwarded socket, so concurrent bridge cleanup cannot erase a replacement. Socket and control cleanup runs detached, and server live handoff remains blocked while a delegation, presentation, peer link, or pending cleanup exists. Peer registration is runtime state rather than a durable trust or pairing record.
+
+The delegation methods form an owner-checked lifecycle. `terminal.delegate.create` prepares a fresh shell, while `terminal.delegate.claim` prepares an existing pane. A fresh shell may include the SSH bridge's current directory and environment; Herdr strips its own routing variables before launch. Remote agent starts mark their uncommitted existing-pane claims for destructive expiry so a failed final attach cannot leave an agent running invisibly. The direct attach client commits the opaque delegation id and epoch when it takes ownership. `terminal.delegate.status` reports `pending`, `active`, `taken_over`, `handed_off`, `terminated`, or pre-commit `failed`. `terminal.delegate.terminate` abandons a pending claim or destroys an active delegated terminal. `terminal.delegate.handoff` accepts the delegated pane's own public `pane_id`, removes its delegation, and creates a new workspace around that live pane on the host server. The CLI exposes only the cursor-scoped form as `herdr remote-handoff`; it takes no target and cannot hand off an arbitrary pane.
+
+The restricted listener permits `ping`, `peer.agent.list`, `peer.agent.get`, and `peer.presentation.activate`. The last method carries only a delegation id and epoch so the hosting server can acknowledge the atomic attach commit to the immediately preceding ownership hop. It rejects `peer.agent.explain`, terminal and detection-preview reads, input, rename, process launch, normal workspace/tab/pane/event operations, integrations, plugins, general peer management, and server control with `method_not_allowed`. This narrow metadata-and-lifecycle boundary lets both servers discover agent state and close activation races without granting the SSH destination command authority on the initiating machine. The SSH reverse forward never targets the normal full JSON API socket or Herdr's private binary client socket. `herdr api bridge` still reaches the normal local API, but only as an explicitly invoked command inside the authenticated SSH session; it is not the forwarded peer endpoint.
+
+Creating the reverse bridge requires the SSH daemon and any applicable `authorized_keys` restrictions to permit remote Unix-socket forwarding. A denial fails explicit `agent.start` or `peer.connect_ssh` with a `remote peer bridge failed` error that retains the actionable remote Unix-socket forwarding and server or authorized-key policy diagnostic; the API does not return a partially connected peer or claim one-way awareness. The pane shim prints that same server error before invoking the real `ssh` with its original raw argv.
+
+The same split applies to remote discovery and capability errors. Raw `peer.connect_ssh` and SSH-backed `agent.start` return an error when remote Herdr is missing, its protocol differs, or either required capability is absent. The interactive pane wrapper prints that error as a fallback warning, cleans up the managed connection, and invokes ordinary SSH with the user's original argv.
 
 `session.snapshot` returns a one-time bootstrap snapshot for clients that keep
 their own local runtime cache. The response includes version/protocol metadata,
@@ -476,6 +502,13 @@ returns `plugin_pane_focused`; close returns `plugin_pane_closed`.
 Herdr uses newline-delimited JSON over a local socket. On Unix, that socket is a
 Unix domain socket. On Windows, it is a named pipe.
 
+On Unix, servers also create a restricted peer listener for federation. Each
+socket endpoint uses mode `0600`. The peer listener has a compact opaque name
+derived from process- and startup-specific input, normally in the full API
+socket's directory. If that path would exceed portable Unix-socket limits,
+Herdr uses a compact temporary-directory fallback. A stale reverse forward
+therefore cannot reconnect to a replacement server after restart.
+
 Send one request per line:
 
 ```json
@@ -500,6 +533,14 @@ Named sessions have separate sockets:
 ~/.config/herdr/herdr.sock
 ~/.config/herdr/sessions/<name>/herdr.sock
 ```
+
+These are the normal API paths. The restricted federation listener is an
+internal per-server endpoint and intentionally has no stable filename or fixed
+relationship to `herdr.sock`; its compact fallback may be in a temporary
+directory. Its identity changes when the server restarts, so clients must not
+derive, cache, or connect to it directly. Herdr's peer setup passes the current
+endpoint internally. Normal scripts and plugins should continue to use
+`herdr.sock` through CLI wrappers or the raw API.
 
 Resolution order:
 
@@ -568,6 +609,8 @@ Session-only official integrations report native session references with `pane.r
 If no native session reference is stored, the field is omitted.
 
 `pane.get`, `pane.list`, `agent.get`, and `agent.list` also expose `foreground_cwd` when Herdr can resolve the cwd of the process currently controlling the pane PTY. The existing `cwd` field remains the pane/workspace cwd used for labels, follow-cwd behavior, and restored session state.
+
+An SSH-backed local presentation may include `mirror_of_terminal_id`. This is a metadata-only identity hint used to suppress a duplicate peer listing when the owner already projects the same native terminal; it does not expose a transport, attach command, session reference, or terminal contents.
 
 Use `pane.report_metadata` when a user hook wants to customize presentation without taking over lifecycle state from a Herdr integration.
 

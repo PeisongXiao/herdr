@@ -2,8 +2,8 @@
 //!
 //! The server:
 //! - Does not enter raw mode or read stdin
-//! - Creates and listens on both `herdr.sock` (existing JSON API) and
-//!   `herdr-client.sock` (new binary protocol)
+//! - Creates and listens on `herdr.sock` (JSON API) and a per-server peer socket
+//!   (restricted peer API), and `herdr-client.sock` (binary client protocol)
 //! - Initializes AppState and all PTYs from session restore or fresh state
 //! - Runs the main event loop (drain events, drain API requests, scheduled tasks)
 //! - Renders to a virtual ratatui Buffer in memory
@@ -230,6 +230,17 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+}
+
+#[cfg(unix)]
+fn ensure_live_handoff_has_no_active_peers(has_active_peers: bool) -> io::Result<()> {
+    if !has_active_peers {
+        return Ok(());
+    }
+
+    Err(io::Error::other(
+        "live handoff cannot continue while peer connections are active, remote presentations are active, or either is still cleaning up; hand remote panes back or close them, run `herdr peer list` and `herdr peer unregister <peer_id>` for each peer, wait briefly for cleanup, then retry, or restart Herdr normally",
+    ))
 }
 
 fn apply_terminal_attach_scroll(
@@ -465,8 +476,9 @@ impl HeadlessServer {
                 crate::render_prof::event("render.request.pty_dirty");
             }
 
-            // 2. Drain a bounded internal-event batch. API handlers perform an
-            // exhaustive forwarding-aware drain before reading pane/runtime state.
+            // 2. Drain a bounded internal-event batch. API handlers drain enough
+            // batches to cover a full queued snapshot without allowing continuous
+            // producers to starve the request.
             if self.drain_internal_events_with_forwarding() {
                 needs_render = true;
                 needs_full_render = true;
@@ -877,10 +889,24 @@ impl HeadlessServer {
     }
 
     #[cfg(unix)]
+    fn has_live_handoff_blockers(&self) -> bool {
+        !self.app.state.peers.is_empty()
+            || self
+                .app
+                .peer_bridges
+                .values()
+                .any(|bridges| !bridges.is_empty())
+            || self.app.has_remote_presentation_activity()
+            || self.app.remote_api_jobs_in_flight != 0
+            || crate::remote_agent::has_pending_peer_cleanup()
+    }
+
+    #[cfg(unix)]
     fn perform_live_handoff(
         &mut self,
         params: crate::api::schema::ServerLiveHandoffParams,
     ) -> io::Result<()> {
+        ensure_live_handoff_has_no_active_peers(self.has_live_handoff_blockers())?;
         info!("starting live handoff");
         let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
         let socket_path = crate::server::handoff::handoff_socket_path();
@@ -969,6 +995,12 @@ impl HeadlessServer {
             .collect();
         let manifest = crate::server::handoff::manifest_for(
             snapshot,
+            self.app
+                .state
+                .public_pane_id_aliases
+                .iter()
+                .map(|(public_id, pane_id)| (public_id.clone(), pane_id.raw()))
+                .collect(),
             panes,
             params.expected_protocol,
             params.expected_version,
@@ -1037,6 +1069,7 @@ impl HeadlessServer {
             let _ = api_server.remove_socket_file_if_owned();
         } else {
             let _ = std::fs::remove_file(crate::api::socket_path());
+            let _ = std::fs::remove_file(crate::api::peer_socket_path());
         }
         let _ = remove_socket_file_if_owned(&self.client_socket_path, &self.client_socket_identity);
         if let Err(err) = crate::server::handoff::wait_ready(&mut stream) {
@@ -1232,13 +1265,20 @@ impl HeadlessServer {
         let removed = self.clients.remove(&client_id);
         if let Some(removed) = removed {
             crate::server::clipboard_image::remove_files(removed.staged_clipboard_files);
-            if let ClientConnectionMode::TerminalAttach { terminal_id } = removed.mode {
+            if let ClientConnectionMode::TerminalAttach {
+                terminal_id,
+                delegation,
+            } = removed.mode
+            {
                 self.terminal_attach_owners.remove(&terminal_id);
                 if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
                     self.app
                         .state
                         .direct_attach_resize_locks
                         .remove(&terminal_id);
+                }
+                if let Some(claim) = delegation {
+                    self.app.terminate_terminal_delegation(&claim);
                 }
             }
         }
@@ -1416,7 +1456,7 @@ impl HeadlessServer {
 
     fn paste_client_clipboard_image_path(&mut self, client_id: u64, path: String) -> bool {
         if let Some(ClientConnection {
-            mode: ClientConnectionMode::TerminalAttach { terminal_id },
+            mode: ClientConnectionMode::TerminalAttach { terminal_id, .. },
             ..
         }) = self.clients.get(&client_id)
         {
@@ -1485,6 +1525,18 @@ impl HeadlessServer {
         else {
             return false;
         };
+        if self.app.terminal_is_remotely_presented(&terminal_id) {
+            self.send_to_client(
+                client_id,
+                ServerMessage::ServerShutdown {
+                    reason: Some(format!(
+                        "terminal session observe failed: terminal {terminal_id} is exclusively presented on another machine"
+                    )),
+                },
+            );
+            self.remove_client_and_resize_if_needed(client_id);
+            return false;
+        }
 
         let stamp = self.allocate_activity_stamp();
         let Some(client) = self.clients.get_mut(&client_id) else {
@@ -1512,7 +1564,7 @@ impl HeadlessServer {
             return false;
         };
 
-        self.attach_terminal_client(client_id, terminal_id, takeover)
+        self.attach_terminal_client(client_id, terminal_id, takeover, None)
     }
 
     fn handle_terminal_attach_scroll(
@@ -1526,7 +1578,7 @@ impl HeadlessServer {
         modifiers: u8,
     ) -> bool {
         let Some(ClientConnection {
-            mode: ClientConnectionMode::TerminalAttach { terminal_id },
+            mode: ClientConnectionMode::TerminalAttach { terminal_id, .. },
             ..
         }) = self.clients.get(&client_id)
         else {
@@ -2055,13 +2107,25 @@ impl HeadlessServer {
             }
             AppEvent::PaneDied { pane_id } => {
                 let pane_id_val = *pane_id;
-                let terminal_id = self.app.state.workspaces.iter().find_map(|ws| {
-                    ws.tabs.iter().find_map(|tab| {
-                        tab.panes
-                            .get(pane_id)
-                            .map(|pane| pane.attached_terminal_id.to_string())
+                let terminal_id = self
+                    .app
+                    .state
+                    .workspaces
+                    .iter()
+                    .find_map(|ws| {
+                        ws.tabs.iter().find_map(|tab| {
+                            tab.panes
+                                .get(pane_id)
+                                .map(|pane| pane.attached_terminal_id.to_string())
+                        })
                     })
-                });
+                    .or_else(|| {
+                        self.app
+                            .state
+                            .delegated_terminal_ids
+                            .get(pane_id)
+                            .map(ToString::to_string)
+                    });
                 if let Some(update) = self
                     .app
                     .state
@@ -2114,7 +2178,7 @@ impl HeadlessServer {
 
     fn drain_all_internal_events_with_forwarding(&mut self) -> bool {
         let mut changed = false;
-        loop {
+        for _ in 0..crate::app::APP_EVENT_EXHAUSTIVE_DRAIN_BATCH_LIMIT {
             let (had_event, batch_changed) =
                 self.drain_internal_events_with_forwarding_up_to(crate::app::APP_EVENT_DRAIN_LIMIT);
             changed |= batch_changed;
@@ -2290,6 +2354,7 @@ impl HeadlessServer {
         client_id: u64,
         terminal_id: String,
         takeover: bool,
+        delegation: Option<crate::api::schema::TerminalDelegationClaim>,
     ) -> bool {
         if !self.client_is_pending_terminal_mode(client_id) {
             self.send_to_client(
@@ -2305,7 +2370,50 @@ impl HeadlessServer {
             return false;
         }
 
-        let Some(real_terminal_id) = self.terminal_id_by_string(&terminal_id) else {
+        if delegation.is_none() && self.app.terminal_is_remotely_presented(&terminal_id) {
+            self.send_to_client(
+                client_id,
+                ServerMessage::ServerShutdown {
+                    reason: Some(format!(
+                        "terminal attach failed: terminal {terminal_id} is exclusively presented on another machine; use a prepared peer attach with --takeover"
+                    )),
+                },
+            );
+            self.remove_client_and_resize_if_needed(client_id);
+            return false;
+        }
+
+        let existing_owner = self.terminal_attach_owners.get(&terminal_id).copied();
+        if existing_owner.is_some_and(|owner| owner != client_id) && !takeover {
+            self.send_to_client(
+                client_id,
+                ServerMessage::ServerShutdown {
+                    reason: Some(format!(
+                        "terminal attach failed: terminal {terminal_id} already has an attached client; retry with --takeover"
+                    )),
+                },
+            );
+            self.remove_client_and_resize_if_needed(client_id);
+            return false;
+        }
+
+        let real_terminal_id = if let Some(claim) = delegation.as_ref() {
+            match self.app.commit_terminal_delegation(claim, &terminal_id) {
+                Ok(terminal_id) => terminal_id,
+                Err(message) => {
+                    self.send_to_client(
+                        client_id,
+                        ServerMessage::ServerShutdown {
+                            reason: Some(format!("terminal attach failed: {message}")),
+                        },
+                    );
+                    self.remove_client_and_resize_if_needed(client_id);
+                    return false;
+                }
+            }
+        } else if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
+            terminal_id
+        } else {
             self.send_to_client(
                 client_id,
                 ServerMessage::ServerShutdown {
@@ -2318,19 +2426,11 @@ impl HeadlessServer {
             return false;
         };
 
-        if let Some(existing_owner) = self.terminal_attach_owners.get(&terminal_id).copied() {
-            if existing_owner != client_id && !takeover {
-                self.send_to_client(
-                    client_id,
-                    ServerMessage::ServerShutdown {
-                        reason: Some(format!(
-                            "terminal attach failed: terminal {terminal_id} already has an attached client; retry with --takeover"
-                        )),
-                    },
-                );
-                self.remove_client_and_resize_if_needed(client_id);
-                return false;
-            }
+        if delegation.is_some() {
+            self.disconnect_terminal_observers_for_remote_presentation(&terminal_id);
+        }
+
+        if let Some(existing_owner) = existing_owner {
             if existing_owner != client_id {
                 self.send_to_client(
                     existing_owner,
@@ -2344,12 +2444,16 @@ impl HeadlessServer {
 
         let stamp = self.allocate_activity_stamp();
         let Some(client) = self.clients.get_mut(&client_id) else {
+            if let Some(claim) = delegation.as_ref() {
+                self.app.terminate_terminal_delegation(claim);
+            }
             return false;
         };
         let (cols, rows) = client.terminal_size;
         let cell_size = client.cell_size;
         client.mode = ClientConnectionMode::TerminalAttach {
             terminal_id: terminal_id.clone(),
+            delegation: delegation.clone(),
         };
         client.pending_terminal_attach = false;
         client.render_state.reset_baseline();
@@ -2372,6 +2476,32 @@ impl HeadlessServer {
             runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
         }
         true
+    }
+
+    fn disconnect_terminal_observers_for_remote_presentation(&mut self, terminal_id: &str) {
+        let observer_ids = self
+            .clients
+            .iter()
+            .filter_map(|(client_id, client)| match &client.mode {
+                ClientConnectionMode::TerminalObserve {
+                    terminal_id: observed,
+                } if observed == terminal_id => Some(*client_id),
+                ClientConnectionMode::App
+                | ClientConnectionMode::TerminalAttach { .. }
+                | ClientConnectionMode::TerminalObserve { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        for observer_id in observer_ids {
+            self.send_to_client(
+                observer_id,
+                ServerMessage::ServerShutdown {
+                    reason: Some(format!(
+                        "terminal observe ended: terminal {terminal_id} is now exclusively presented on another machine"
+                    )),
+                },
+            );
+            self.remove_client_and_resize_if_needed(observer_id);
+        }
     }
 
     fn client_is_pending_terminal_mode(&self, client_id: u64) -> bool {
@@ -2517,7 +2647,8 @@ impl HeadlessServer {
                 client_id,
                 terminal_id,
                 takeover,
-            } => self.attach_terminal_client(client_id, terminal_id, takeover),
+                delegation,
+            } => self.attach_terminal_client(client_id, terminal_id, takeover, delegation),
             ServerEvent::ClientObserveTerminal { client_id, target } => {
                 self.observe_terminal_client(client_id, target)
             }
@@ -2548,7 +2679,7 @@ impl HeadlessServer {
                 }
                 debug!(client_id, len = data.len(), "client input received");
                 if let Some(ClientConnection {
-                    mode: ClientConnectionMode::TerminalAttach { terminal_id },
+                    mode: ClientConnectionMode::TerminalAttach { terminal_id, .. },
                     ..
                 }) = self.clients.get(&client_id)
                 {
@@ -2640,7 +2771,7 @@ impl HeadlessServer {
                     cols, rows, cell_width_px, cell_height_px, "client resize"
                 );
                 let direct_terminal_id = if let Some(ClientConnection {
-                    mode: ClientConnectionMode::TerminalAttach { terminal_id },
+                    mode: ClientConnectionMode::TerminalAttach { terminal_id, .. },
                     terminal_size,
                     cell_size,
                     render_state,
@@ -2777,7 +2908,9 @@ impl HeadlessServer {
             let response = match self.perform_live_handoff(params.clone()) {
                 Ok(()) => serde_json::to_string(&api::schema::SuccessResponse {
                     id: msg.request.id,
-                    result: api::schema::ResponseResult::Ok {},
+                    result: api::schema::ResponseResult::Ok {
+                        terminated_remote_presentations: None,
+                    },
                 }),
                 Err(err) => serde_json::to_string(&api::schema::ErrorResponse {
                     id: msg.request.id,
@@ -2823,6 +2956,14 @@ impl HeadlessServer {
                 api::schema::Method::ServerStop(_) | api::schema::Method::ServerLiveHandoff(_)
             );
         changed |= self.drain_all_internal_events_with_forwarding();
+
+        if self.app.should_defer_remote_api_request(&msg.request) {
+            self.app.handle_deferred_remote_api_request(msg);
+            if !skip_default_workspace && latest_app_client(&self.clients).is_some() {
+                changed |= self.app.ensure_default_workspace();
+            }
+            return changed;
+        }
 
         // Capture toast and effective pane states before the API call so we can
         // forward resulting client-local notifications. API requests like
@@ -2896,6 +3037,7 @@ impl HeadlessServer {
                 .handle_api_request_after_internal_events_drained(msg.request)
         };
         let _ = msg.respond_to.send(response);
+        self.disconnect_handed_off_terminal_clients();
 
         // Forward new toast state only when a client-local delivery mode is selected.
         // Herdr delivery renders the toast in-frame and must not ask clients to
@@ -3040,6 +3182,35 @@ impl HeadlessServer {
         }
 
         changed
+    }
+
+    fn disconnect_handed_off_terminal_clients(&mut self) {
+        let client_ids: Vec<u64> = self
+            .clients
+            .iter()
+            .filter_map(|(client_id, client)| match &client.mode {
+                ClientConnectionMode::TerminalAttach {
+                    delegation: Some(claim),
+                    ..
+                } => self
+                    .app
+                    .terminal_delegation_info(&claim.delegation_id, claim.epoch)
+                    .is_some_and(|info| {
+                        info.status == crate::api::schema::TerminalDelegationStatus::HandedOff
+                    })
+                    .then_some(*client_id),
+                _ => None,
+            })
+            .collect();
+        for client_id in client_ids {
+            self.send_to_client(
+                client_id,
+                ServerMessage::ServerShutdown {
+                    reason: Some("remote terminal handed off to its host Herdr session".into()),
+                },
+            );
+            self.remove_client_and_resize_if_needed(client_id);
+        }
     }
 
     fn stream_host_mouse_capture_mode(&mut self) {
@@ -3370,7 +3541,7 @@ impl HeadlessServer {
                     crate::render_prof::duration_since("full_render.frame_build", frame_started);
                     frame
                 }
-                ClientConnectionMode::TerminalAttach { terminal_id }
+                ClientConnectionMode::TerminalAttach { terminal_id, .. }
                 | ClientConnectionMode::TerminalObserve { terminal_id } => {
                     let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) else {
                         self.send_to_client(
@@ -3586,6 +3757,10 @@ impl HeadlessServer {
         let mut changed = false;
 
         self.app.sync_headless_animation_timer(now);
+        changed |= self.app.expire_ssh_shell_bridge_leases(now);
+        changed |= self.app.expire_incoming_peer_leases(now);
+        changed |= self.app.expire_remote_owner_leases(now);
+        changed |= self.app.expire_remote_presentations(now);
 
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
@@ -3762,7 +3937,33 @@ impl HeadlessServer {
         }
 
         // Drain remaining API requests with server_unavailable.
+        #[cfg(unix)]
+        {
+            self.api_server.take();
+            self.api_tx.take();
+        }
         self.drain_api_requests_with_shutdown_check();
+
+        if !self.quiesce_remote_api_jobs(crate::app::REMOTE_API_SHUTDOWN_TIMEOUT) {
+            warn!(
+                remaining = self.app.remote_api_jobs_in_flight,
+                "timed out waiting for remote API jobs during shutdown"
+            );
+            self.app.event_rx.close();
+        }
+        let terminated_remote_presentations = self.app.terminate_all_remote_presentations();
+        if terminated_remote_presentations > 0 {
+            warn!(
+                count = terminated_remote_presentations,
+                "server shutdown terminated remotely presented panes"
+            );
+        }
+        self.app.shutdown_peer_runtime();
+        if !crate::remote_agent::wait_for_pending_peer_cleanup(
+            crate::app::PEER_CLEANUP_SHUTDOWN_TIMEOUT,
+        ) {
+            warn!("timed out waiting for SSH peer cleanup during shutdown");
+        }
 
         // Close all client connections.
         let staged_files = self
@@ -3776,6 +3977,10 @@ impl HeadlessServer {
         self.cleanup_sockets()?;
 
         Ok(())
+    }
+
+    fn quiesce_remote_api_jobs(&mut self, timeout: Duration) -> bool {
+        self.app.quiesce_remote_api_jobs_for_shutdown(timeout)
     }
 
     /// Removes socket files created by the server.
@@ -3966,6 +4171,7 @@ pub fn run_server() -> io::Result<()> {
 
         info!(
             api_socket = %api::socket_path().display(),
+            peer_api_socket = %api::peer_socket_path().display(),
             client_socket = %client_socket_path().display(),
             "herdr server started"
         );
@@ -4042,6 +4248,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             api_rx,
             event_hub.clone(),
             &received.manifest.snapshot,
+            &received.manifest.public_pane_id_aliases,
             &mut imports,
         )?;
         app.state.local_sound_playback = false;
@@ -4083,12 +4290,15 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
 fn wait_for_old_public_sockets_to_close(timeout: Duration) -> io::Result<()> {
     let deadline = Instant::now() + timeout;
     let api_socket = api::socket_path();
+    let peer_api_socket = api::peer_socket_path();
     let client_socket = client_socket_path();
     while Instant::now() < deadline {
         let api_open = api_socket.exists() && crate::ipc::connect_local_stream(&api_socket).is_ok();
+        let peer_api_open =
+            peer_api_socket.exists() && crate::ipc::connect_local_stream(&peer_api_socket).is_ok();
         let client_open =
             client_socket.exists() && crate::ipc::connect_local_stream(&client_socket).is_ok();
-        if !api_open && !client_open {
+        if !api_open && !peer_api_open && !client_open {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -4241,6 +4451,43 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn live_handoff_peer_bridge_guard_is_actionable() {
+        assert!(ensure_live_handoff_has_no_active_peers(false).is_ok());
+
+        let error = ensure_live_handoff_has_no_active_peers(true).unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("peer connections are active"));
+        assert!(message.contains("herdr peer list"));
+        assert!(message.contains("herdr peer unregister <peer_id>"));
+        assert!(message.contains("restart Herdr normally"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn live_handoff_is_blocked_by_pending_terminal_delegation_without_a_peer_record() {
+        let mut server = test_headless_server();
+        server
+            .app
+            .prepare_delegated_terminal(crate::api::schema::TerminalDelegateCreateParams {
+                cwd: Some(std::env::temp_dir().display().to_string()),
+                label: Some("pending".into()),
+                env: std::collections::HashMap::new(),
+                owner: crate::api::schema::TerminalPresentationOwner {
+                    peer_id: "owner-a".into(),
+                    pane_id: "owner-a:pane".into(),
+                    route: vec!["owner-a".into()],
+                },
+            })
+            .expect("prepare delegation");
+
+        assert!(server.app.state.peers.is_empty());
+        assert!(server.has_live_handoff_blockers());
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[test]
     fn headless_api_request_drains_all_pending_internal_events_before_reading_state() {
         let mut server = test_headless_server();
         for i in 0..=crate::app::APP_EVENT_DRAIN_LIMIT {
@@ -4270,12 +4517,104 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(response["result"]["type"], "ok");
+        assert_eq!(response["result"]["terminated_remote_presentations"], 0);
         let expected_version = format!("4.0.{}", crate::app::APP_EVENT_DRAIN_LIMIT);
         assert_eq!(
             server.app.state.update_available.as_deref(),
             Some(expected_version.as_str())
         );
         assert!(server.app.event_rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn headless_peer_health_runs_outside_the_server_loop() {
+        let mut server = test_headless_server();
+        server.app.state.peers.insert(
+            "origin".into(),
+            api::schema::PeerInfo {
+                id: "origin".into(),
+                label: "origin".into(),
+                status: api::schema::PeerStatus::Connected,
+                transport: api::schema::PeerTransportInfo::ApiSocket {
+                    api_socket: "\0".into(),
+                },
+            },
+        );
+        server
+            .app
+            .peer_refresh_generations
+            .insert("origin".into(), 1);
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let started = Instant::now();
+
+        server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            request: api::schema::Request {
+                id: "health".into(),
+                method: api::schema::Method::PeerHealth(api::schema::PeerTarget {
+                    peer_id: "origin".into(),
+                }),
+            },
+            respond_to,
+        });
+
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(server.app.remote_api_jobs_in_flight, 1);
+        assert!(response_rx.try_recv().is_err());
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let event = loop {
+            match server.app.event_rx.try_recv() {
+                Ok(event) => break event,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(err) => panic!("deferred health event did not arrive: {err}"),
+            }
+        };
+        server.handle_internal_event_with_forwarding(event);
+
+        assert_eq!(server.app.remote_api_jobs_in_flight, 0);
+        let response: serde_json::Value =
+            serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
+        assert_eq!(response["result"]["peer"]["status"], "disconnected");
+    }
+
+    #[test]
+    fn shutdown_quiesces_completed_remote_api_jobs() {
+        let mut server = test_headless_server();
+        let peer = api::schema::PeerInfo {
+            id: "origin".into(),
+            label: "origin".into(),
+            status: api::schema::PeerStatus::Connected,
+            transport: api::schema::PeerTransportInfo::ApiSocket {
+                api_socket: "/tmp/origin.sock".into(),
+            },
+        };
+        server.app.state.peers.insert(peer.id.clone(), peer.clone());
+        server
+            .app
+            .peer_refresh_generations
+            .insert(peer.id.clone(), 1);
+        server.app.remote_api_jobs_in_flight = 1;
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        server
+            .app
+            .event_tx
+            .try_send(AppEvent::PeerHealthRequestFinished(Box::new(
+                crate::events::PeerHealthRequestResult {
+                    id: "health".into(),
+                    peer,
+                    generation: 1,
+                    result: Ok(serde_json::json!({"result": {"type": "pong"}})),
+                    respond_to,
+                },
+            )))
+            .unwrap();
+
+        assert!(server.quiesce_remote_api_jobs(Duration::from_millis(100)));
+        assert_eq!(server.app.remote_api_jobs_in_flight, 0);
+        assert!(response_rx.recv_timeout(Duration::from_millis(100)).is_ok());
     }
 
     #[tokio::test]
@@ -4701,6 +5040,7 @@ next_tab = ""
                 client_id: 7,
                 terminal_id: "term_missing".to_owned(),
                 takeover: false,
+                delegation: None,
             })
         );
         assert!(!server.clients.contains_key(&7));
@@ -4762,6 +5102,243 @@ next_tab = ""
         control_rx
     }
 
+    fn prepare_test_delegation(
+        server: &mut HeadlessServer,
+        target: &str,
+        owner_peer_id: &str,
+        takeover: bool,
+    ) -> crate::api::schema::TerminalDelegationInfo {
+        server
+            .app
+            .prepare_existing_terminal_delegation(crate::api::schema::TerminalDelegateClaimParams {
+                target: target.into(),
+                owner: crate::api::schema::TerminalPresentationOwner {
+                    peer_id: owner_peer_id.into(),
+                    pane_id: format!("{owner_peer_id}:pane"),
+                    route: vec![owner_peer_id.into()],
+                },
+                takeover,
+                terminate_on_expire: false,
+            })
+            .expect("prepare delegation")
+    }
+
+    fn test_delegation_claim(
+        info: &crate::api::schema::TerminalDelegationInfo,
+    ) -> crate::api::schema::TerminalDelegationClaim {
+        crate::api::schema::TerminalDelegationClaim {
+            delegation_id: info.delegation_id.clone(),
+            epoch: info.epoch,
+        }
+    }
+
+    #[test]
+    fn delegated_attach_disconnect_terminates_the_hosted_terminal() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let prepared = prepare_test_delegation(server, &terminal_id_string, "owner-a", false);
+            connect_pending_terminal_client(server, 7);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                    client_id: 7,
+                    terminal_id: terminal_id_string.clone(),
+                    takeover: false,
+                    delegation: Some(test_delegation_claim(&prepared)),
+                })
+            );
+            assert!(server.app.state.workspaces.is_empty());
+            assert!(server.app.state.terminals.contains_key(&terminal_id));
+
+            assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 7 }));
+
+            assert!(!server.app.state.terminals.contains_key(&terminal_id));
+            assert_eq!(server.app.active_remote_presentation_count(), 0);
+            assert_eq!(
+                server
+                    .app
+                    .terminal_delegation_info(&prepared.delegation_id, prepared.epoch)
+                    .expect("terminal status")
+                    .status,
+                crate::api::schema::TerminalDelegationStatus::Terminated
+            );
+            server.app.state.assert_invariants_for_test();
+        });
+    }
+
+    #[test]
+    fn delegated_terminal_exit_closes_its_remote_attach_client() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let prepared = prepare_test_delegation(server, &terminal_id_string, "owner-a", false);
+            let control = connect_pending_terminal_client_with_control_rx(server, 7);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                    client_id: 7,
+                    terminal_id: terminal_id_string.clone(),
+                    takeover: false,
+                    delegation: Some(test_delegation_claim(&prepared)),
+                })
+            );
+            let pane_id = server
+                .app
+                .remote_presentations
+                .active
+                .values()
+                .next()
+                .expect("active delegation")
+                .moved
+                .pane_id;
+
+            assert!(server.handle_internal_event_with_forwarding(AppEvent::PaneDied { pane_id }));
+
+            assert!(!server.clients.contains_key(&7));
+            assert!(!server.app.state.terminals.contains_key(&terminal_id));
+            assert_eq!(
+                read_server_shutdown_reason(control.recv().expect("terminal exit shutdown")),
+                Some(format!("terminal {terminal_id_string} exited"))
+            );
+            assert_eq!(
+                server
+                    .app
+                    .terminal_delegation_info(&prepared.delegation_id, prepared.epoch)
+                    .expect("terminal status")
+                    .status,
+                crate::api::schema::TerminalDelegationStatus::Terminated
+            );
+        });
+    }
+
+    #[test]
+    fn uncommitted_remote_agent_claim_expires_and_stops_its_runtime() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let prepared = server
+                .app
+                .prepare_existing_terminal_delegation(
+                    crate::api::schema::TerminalDelegateClaimParams {
+                        target: terminal_id_string,
+                        owner: crate::api::schema::TerminalPresentationOwner {
+                            peer_id: "owner-a".into(),
+                            pane_id: "owner-a:pane".into(),
+                            route: vec!["owner-a".into()],
+                        },
+                        takeover: false,
+                        terminate_on_expire: true,
+                    },
+                )
+                .expect("prepare destructive pending claim");
+
+            assert!(server
+                .app
+                .expire_remote_presentations(Instant::now() + Duration::from_secs(31)));
+
+            assert!(server.app.terminal_runtimes.get(&terminal_id).is_none());
+            assert_eq!(
+                server
+                    .app
+                    .terminal_delegation_info(&prepared.delegation_id, prepared.epoch)
+                    .expect("failed status")
+                    .status,
+                crate::api::schema::TerminalDelegationStatus::Failed
+            );
+        });
+    }
+
+    #[test]
+    fn remote_handoff_preserves_the_terminal_and_disconnects_its_attach() {
+        with_terminal_session_test_server(
+            |server, terminal_id, terminal_id_string, public_pane_id| {
+                let prepared =
+                    prepare_test_delegation(server, &terminal_id_string, "owner-a", false);
+                connect_pending_terminal_client(server, 7);
+                assert!(
+                    server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                        client_id: 7,
+                        terminal_id: terminal_id_string,
+                        takeover: false,
+                        delegation: Some(test_delegation_claim(&prepared)),
+                    })
+                );
+
+                server
+                    .app
+                    .handoff_delegated_pane(&public_pane_id)
+                    .expect("handoff");
+                server.disconnect_handed_off_terminal_clients();
+
+                assert!(!server.clients.contains_key(&7));
+                assert!(server.app.state.terminals.contains_key(&terminal_id));
+                assert!(server.app.terminal_runtimes.get(&terminal_id).is_some());
+                assert_eq!(server.app.state.workspaces.len(), 1);
+                assert_eq!(server.app.active_remote_presentation_count(), 0);
+                server.app.state.assert_invariants_for_test();
+            },
+        );
+    }
+
+    #[test]
+    fn explicit_takeover_disconnects_the_old_owner_without_killing_the_terminal() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let first = prepare_test_delegation(server, &terminal_id_string, "owner-a", false);
+            let first_control = connect_pending_terminal_client_with_control_rx(server, 7);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                    client_id: 7,
+                    terminal_id: terminal_id_string.clone(),
+                    takeover: false,
+                    delegation: Some(test_delegation_claim(&first)),
+                })
+            );
+
+            let unprepared_control = connect_pending_terminal_client_with_control_rx(server, 9);
+            assert!(
+                !server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                    client_id: 9,
+                    terminal_id: terminal_id_string.clone(),
+                    takeover: true,
+                    delegation: None,
+                })
+            );
+            assert!(server.clients.contains_key(&7));
+            assert!(server.app.state.terminals.contains_key(&terminal_id));
+            assert!(read_server_shutdown_reason(
+                unprepared_control.recv().expect("unprepared rejection")
+            )
+            .expect("reason")
+            .contains("exclusively presented"));
+
+            let second = prepare_test_delegation(server, &terminal_id_string, "owner-b", true);
+            connect_pending_terminal_client(server, 8);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                    client_id: 8,
+                    terminal_id: terminal_id_string.clone(),
+                    takeover: true,
+                    delegation: Some(test_delegation_claim(&second)),
+                })
+            );
+
+            assert!(!server.clients.contains_key(&7));
+            assert!(server.clients.contains_key(&8));
+            assert_eq!(
+                server.terminal_attach_owners.get(&terminal_id_string),
+                Some(&8)
+            );
+            assert!(server.app.state.terminals.contains_key(&terminal_id));
+            assert!(server.app.terminal_runtimes.get(&terminal_id).is_some());
+            assert_eq!(
+                read_server_shutdown_reason(first_control.recv().expect("takeover shutdown")),
+                Some("terminal attach taken over".into())
+            );
+            assert_eq!(
+                server
+                    .app
+                    .terminal_delegation_info(&first.delegation_id, first.epoch)
+                    .expect("old owner status")
+                    .status,
+                crate::api::schema::TerminalDelegationStatus::TakenOver
+            );
+            server.app.state.assert_invariants_for_test();
+        });
+    }
+
     #[test]
     fn terminal_observe_allows_multiple_clients_without_attach_ownership() {
         with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
@@ -4805,6 +5382,73 @@ next_tab = ""
     }
 
     #[test]
+    fn terminal_delegation_disconnects_an_existing_observer() {
+        with_terminal_session_test_server(|server, _terminal_id, terminal_id_string, _| {
+            let observer = connect_pending_terminal_client_with_control_rx(server, 7);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminal {
+                    client_id: 7,
+                    target: terminal_id_string.clone(),
+                })
+            );
+            let prepared = prepare_test_delegation(server, &terminal_id_string, "owner-a", false);
+            connect_pending_terminal_client(server, 8);
+
+            assert!(
+                server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                    client_id: 8,
+                    terminal_id: terminal_id_string.clone(),
+                    takeover: false,
+                    delegation: Some(test_delegation_claim(&prepared)),
+                })
+            );
+
+            assert!(!server.clients.contains_key(&7));
+            assert!(server.clients.contains_key(&8));
+            assert_eq!(
+                server.terminal_attach_owners.get(&terminal_id_string),
+                Some(&8)
+            );
+            assert!(
+                read_server_shutdown_reason(observer.recv().expect("observer shutdown"))
+                    .expect("reason")
+                    .contains("exclusively presented")
+            );
+        });
+    }
+
+    #[test]
+    fn terminal_observe_rejects_a_terminal_presented_on_another_machine() {
+        with_terminal_session_test_server(|server, _terminal_id, terminal_id_string, _| {
+            let prepared = prepare_test_delegation(server, &terminal_id_string, "owner-a", false);
+            connect_pending_terminal_client(server, 7);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                    client_id: 7,
+                    terminal_id: terminal_id_string.clone(),
+                    takeover: false,
+                    delegation: Some(test_delegation_claim(&prepared)),
+                })
+            );
+
+            let observer = connect_pending_terminal_client_with_control_rx(server, 8);
+            assert!(
+                !server.handle_server_event(ServerEvent::ClientObserveTerminal {
+                    client_id: 8,
+                    target: terminal_id_string.clone(),
+                })
+            );
+
+            assert!(!server.clients.contains_key(&8));
+            assert!(
+                read_server_shutdown_reason(observer.recv().expect("observer rejection"))
+                    .expect("reason")
+                    .contains("exclusively presented")
+            );
+        });
+    }
+
+    #[test]
     fn terminal_observe_resolves_public_pane_id() {
         with_terminal_session_test_server(|server, terminal_id, _, public_pane_id| {
             connect_pending_terminal_client(server, 7);
@@ -4838,7 +5482,10 @@ next_tab = ""
 
                 assert!(matches!(
                     server.clients.get(&7).map(|client| &client.mode),
-                    Some(ClientConnectionMode::TerminalAttach { terminal_id: attached })
+                    Some(ClientConnectionMode::TerminalAttach {
+                        terminal_id: attached,
+                        ..
+                    })
                         if attached == &terminal_id_string
                 ));
                 assert_eq!(
@@ -4988,6 +5635,7 @@ next_tab = ""
                     client_id: 7,
                     terminal_id: terminal_id_string,
                     takeover: true,
+                    delegation: None,
                 })
             );
 
@@ -5010,6 +5658,7 @@ next_tab = ""
                     client_id: 7,
                     terminal_id: terminal_id_string.clone(),
                     takeover: false,
+                    delegation: None,
                 })
             );
             assert_eq!(
@@ -5178,6 +5827,7 @@ next_tab = ""
                 client_id: 7,
                 terminal_id: terminal_id.clone(),
                 takeover: false,
+                delegation: None,
             })
         );
         assert_eq!(server.terminal_attach_owners.get(&terminal_id), Some(&7));
@@ -6762,6 +7412,7 @@ next_tab = ""
                 client_id: 2,
                 terminal_id: terminal_id_string.clone(),
                 takeover: false,
+                delegation: None,
             })
         );
         assert_eq!(server.foreground_client_id, Some(1));

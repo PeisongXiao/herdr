@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-pub(super) fn normalize_launch_env(
+pub(crate) fn normalize_launch_env(
     env: HashMap<String, String>,
 ) -> Result<Vec<(String, String)>, (String, String)> {
     let mut normalized = Vec::with_capacity(env.len());

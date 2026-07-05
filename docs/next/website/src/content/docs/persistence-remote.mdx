@@ -93,6 +93,151 @@ Use `--session` with `--remote` to attach to a named session on the remote host:
 herdr --remote workbox --session agents
 ```
 
+## SSH from inside Herdr
+
+On Unix, the direct ergonomic path starts with a local Herdr session:
+
+```bash
+herdr
+# inside a Herdr pane
+ssh workbox
+```
+
+OpenSSH performs normal foreground authentication. Herdr then finds or starts the remote Herdr daemon, verifies the required protocol and capabilities, links the two servers, and presents a new remote shell in the pane where you ran `ssh`. The managed shell belongs to remote Herdr session `default`; you do not start a second TUI or choose a remote socket.
+
+This workflow delegates a pane instead of mirroring it. Its process and PTY stay on the remote host, but the pane is present in a workspace on exactly one machine. While your local Herdr presents it, the remote daemon removes it from its own workspace list. The [pane ownership and lifecycle](#pane-ownership-and-lifecycle) section below explains why this path is intentionally destructive on disconnect and how to keep a pane with `herdr remote-handoff`.
+
+## SSH agent sessions
+
+Use `herdr agent start --ssh` when you want the first screen to feel like starting a local agent, but the process should run inside a remote Herdr server:
+
+```bash
+herdr agent start reviewer --ssh workbox --agent opencode --cwd /repo -- opencode
+```
+
+This direct federation path is currently Unix-only. The local Herdr server authenticates with OpenSSH, starts the remote Herdr server if needed, checks protocol, peer-federation, and remote-presentation compatibility, optionally prepares the official agent integration, starts the agent remotely, and delegates its pane into a local workspace. Before opening managed SSH, the CLI rejects effective SSH config that changes interactive session semantics; the server enforces the same boundary for SSH-backed agent and API requests.
+
+The delegated pane and peer bridge are runtime-only. They are not a detachable remote session: closing the local owner pane, stopping the local Herdr server, or losing the SSH transport terminates the remote pane and agent. If the work should continue on the remote host, run `herdr remote-handoff` from inside the presented pane before disconnecting. This terminal handoff is separate from the server-replacement `--handoff` option used by updates and `herdr --remote`.
+
+Herdr chooses the integration from `--agent AGENT`, or recognizes the first command in `argv` when `--agent` is omitted. Use `--no-remote-integration` when hooks are already managed or the command is not a recognized agent. `--ssh` accepts an SSH target rather than arbitrary SSH options, so put ports, identities, jump hosts, and similar settings in `~/.ssh/config`.
+
+Use `--ssh-session NAME` to use a named remote Herdr session:
+
+```bash
+herdr agent start reviewer --ssh workbox --ssh-session agents --agent opencode --cwd /repo -- opencode
+```
+
+Session selection is explicit for direct SSH federation. Both `herdr agent start --ssh workbox` and pane `ssh workbox` pass remote Herdr session `default` explicitly, so inherited or SSH-accepted `HERDR_SESSION`, `HERDR_SOCKET_PATH`, and `HERDR_CLIENT_SOCKET_PATH` values cannot redirect setup, API calls, or the final attach. A named remote agent session still requires `--ssh-session NAME`; plain pane SSH does not select named sessions from local state, environment, or SSH config.
+
+Unlike `herdr --remote`, direct federation does not copy, download, install, or replace Herdr on the remote host. It searches in this order:
+
+1. `herdr` on the remote `PATH`
+2. `~/.local/bin/herdr`
+3. common system, Homebrew, Linuxbrew, mise, and Nix profile locations
+
+The default destination of `install-local.sh` therefore works even when `~/.local/bin` has not been added to the non-interactive SSH `PATH`. If no binary is found, Herdr prints an explicit install warning. If the running remote server has a different protocol or does not advertise both peer federation and remote presentation, Herdr prints an explicit compatibility warning asking you to update both machines. An explicit `agent start --ssh` or API request fails rather than silently turning into an unmanaged SSH shell. The pane shim reports the missing requirement or setup error, closes its private managed connection, and then runs the original raw SSH argv unchanged as ordinary SSH.
+
+Full bidirectional awareness also requires SSH to permit remote forwarding of a Unix-domain socket for the account being used. If forwarding is restricted, check both the SSH daemon's forwarding policy, including account-specific rules, and any options attached to the key in `authorized_keys`; ask the server administrator to permit the Herdr remote Unix-socket forward without relaxing unrelated SSH access. When that forward is denied, Herdr retains the actionable `remote peer bridge failed` diagnostic explaining that federation requires remote Unix-socket forwarding and identifying server or authorized-key restrictions. Explicit agent and API starts stop rather than silently continuing with one-way awareness. The pane shim prints the same diagnostic before falling through to the original raw SSH argv.
+
+After the peer link is registered, the initiating side can operate on remote agents while the remote side receives metadata-only awareness of origin agents:
+
+```bash
+herdr agent list
+herdr agent read workbox::reviewer
+herdr agent attach workbox::reviewer
+herdr peer health workbox
+```
+
+Peer ids come from the SSH target, options, and remote session. Use `herdr peer list` rather than assuming a fixed id, especially with named sessions.
+
+## SSH integration details
+
+On Unix, Herdr puts a small `ssh` shim first on the `PATH` of each pane. Typing a supported interactive SSH command uses the remote Herdr server instead of leaving that connection as an unmanaged raw shell:
+
+```bash
+ssh workbox
+ssh -p 2222 -i ~/.ssh/workbox -J bastion -A you@workbox
+```
+
+On newly created macOS login-zsh panes, including the default `shell_mode = "auto"` configuration, a private one-shot startup hook keeps that shim ahead of paths rewritten by `/usr/libexec/path_helper`. The hook restores the user's original `ZDOTDIR` and normal startup files first, then re-prepends the shim and runs `rehash` at the first prompt before removing itself. Aliases and functions retain their normal shell precedence, and an explicit absolute path such as `/usr/bin/ssh` retains its direct meaning. Panes that were already running when Herdr was updated are unchanged until they are recreated.
+
+For an interactive pane, Herdr first asks the real OpenSSH client to establish the connection. Host-key confirmation, passwords, key passphrases, and MFA stay attached to the foreground terminal; Herdr never reads those credentials. After authentication succeeds, OpenSSH backgrounds a private control master. Herdr reuses that connection for discovery, server and capability checks, the reverse peer bridge, and the final terminal attach, so password-based hosts normally prompt once. The managed connection also carries SSH keepalives.
+
+The final SSH channel claims a new server-owned shell from the remote default session and attaches directly to it. The shell copies the SSH command's current directory and environment, removes Herdr's internal routing variables, and preserves SSH session values such as `SSH_CONNECTION`, accepted locale variables, and a forwarded `SSH_AUTH_SOCK`. The remote daemon owns the shell process while the initiating Herdr pane exclusively owns its presentation. To choose a named remote session while starting an agent explicitly, use `herdr agent start --ssh workbox --ssh-session NAME ...` instead.
+
+### Pane ownership and lifecycle
+
+A managed remote pane has exactly one workspace owner. When machine A presents a pane whose process runs under machine B's Herdr daemon, B removes that pane from its own workspaces; it is not visible in both TUIs and is not a read-only mirror. Agent state and terminal input still come from the one native terminal on B.
+
+That ownership is a lifecycle contract, not normal Herdr detach persistence. Any of these events terminates the delegated pane and its process on B:
+
+- the SSH attach exits or the network connection is lost
+- the owner pane on A is closed
+- A's owning Herdr server stops or can no longer renew the connection
+- the delegation is explicitly replaced or terminated
+
+After an established managed SSH presentation ends, Herdr also closes the former owner pane instead of restoring its pre-SSH shell. If the final attach is rejected before ownership commits, Herdr abandons the prepared remote claim and keeps the local pane open. Use ordinary SSH followed by remote `herdr`, or use `herdr --remote`, when you want a whole remote session whose panes survive a client disconnect.
+
+### Keep the pane on its host
+
+To preserve the current delegated pane before ending the connection, run this inside that pane:
+
+```bash
+herdr remote-handoff
+```
+
+`remote-handoff` is cursor-only: it takes no host, pane id, or target and works only in the currently delegated pane containing the command. The remote daemon removes the delegation and puts that same live pane into a new workspace on its own host. It does not merge the pane into an existing workspace or change an already attached remote TUI's focus; it becomes active only when that server had no active workspace. The managed attach then ends and the old owner pane closes. If that pane owns a deeper remote presentation, including one whose connection is still being prepared, Herdr refuses the intermediate handoff; finish or cancel setup and hand off the innermost pane first. Use `herdr --remote workbox`, or ordinary SSH followed by `herdr`, to continue in the full remote session and select the new workspace.
+
+This command is unrelated to update live handoff. `herdr remote-handoff` moves one delegated pane back into its host's workspace list; `herdr update --handoff` and `herdr --remote --handoff` replace a running server while trying to preserve all of its panes.
+
+### Nested SSH and takeover
+
+Supported SSH remains integrated inside a delegated remote pane:
+
+```bash
+ssh workbox
+# now inside the delegated workbox pane
+ssh gpu-box
+```
+
+Each hop connects to that host's Herdr daemon and carries the existing presentation owner forward. The original visible pane presents the innermost shell, while intermediate and destination daemons keep their delegated panes out of local workspaces. A disconnect or owner stop unwinds the delegated chain destructively. Running `herdr remote-handoff` on `gpu-box` affects only the innermost pane under the cursor: that pane becomes a new `gpu-box` workspace and the outer managed attaches unwind.
+
+Attaching an existing peer agent uses the same exclusive ownership rule. If another machine already presents it, Herdr refuses the move by default. Run the attach from the pane that should become the owner and add `--takeover` only when replacing the previous presentation is intentional:
+
+```bash
+herdr agent attach workbox::reviewer --takeover
+```
+
+The previous owner is disconnected; takeover never creates two live presentations of one pane. If that pane currently owns a deeper remote presentation, hand back or close the deeper pane first; Herdr rejects an intermediate takeover rather than leaving a stale transitive owner. Plain managed `ssh` creates a fresh remote shell, so it does not need a takeover flag.
+
+### Supported SSH forms
+
+Herdr integrates only destination-only interactive sessions that it can classify without changing their meaning.
+
+| Form | Behavior |
+| --- | --- |
+| `ssh host`, `ssh user@host` | Integrated |
+| Common connection/authentication options such as `-4`, `-6`, `-A`, `-a`, `-C`, `-F`, `-i`, `-J`, `-l`, `-p`, and compatible `-o` settings | Integrated and preserved |
+| `-t`, `-tt`, and compatible TTY-request settings | Integrated; the final attach always requests a TTY |
+| `ssh host command ...` or a second positional argument | Real `ssh` |
+| `-L`, `-R`, `-D`, `-W`, `-w`, `-N`, `-f`, `-s`, or `-T` | Real `ssh` |
+| Equivalent command-line `-o` or effective SSH-config settings for remote commands, forwarding, local commands, noninteractive or subsystem sessions, backgrounding, or tunnels | Real `ssh` |
+| Unknown or ambiguous option shapes | Real `ssh` |
+
+Herdr considers the effective OpenSSH configuration for the destination, including values selected through `Host`, `Match`, and `Include` rules. If that configuration gives the connection remote-command, noninteractive/sessionless, local-command, forwarding, or tunnel semantics, the pane shim passes the original raw argv to the real `ssh` unchanged. It does not remove or override those settings to force integration. A failure to inspect effective config, reach the local Herdr API, or finish managed setup takes the same pane-only fallback path. By contrast, explicit `agent start --ssh` and raw API federation reject unsafe effective config, with server-side enforcement, before managed SSH work begins.
+
+`scp` and `sftp` are not intercepted. Use `HERDR_SSH_BYPASS=1 ssh workbox` for one raw SSH command, or set `[remote].ssh_integration = false` to disable the pane shim. The `[remote].manage_ssh_config` setting affects `herdr --remote`, not this direct SSH integration.
+
+### Peer boundary and reconnecting
+
+The peer link makes agent metadata visible in both directions without reversing SSH's normal trust direction. The machine that initiated SSH can list, inspect, read, explain, send to, rename, start, wait for, and attach to agents on the remote server. Through the restricted reverse link, the remote server can ping the origin and list or get origin agent metadata. It cannot explain those agents, preview detection, read their terminal contents, send input, rename them, or start local processes.
+
+The reverse SSH forwarding reaches the current server's opaque, per-server restricted endpoint. It accepts `ping`, `peer.agent.list`, `peer.agent.get`, and the id-and-epoch-only `peer.presentation.activate` acknowledgement sent immediately after a host commits a delegation. Its compact, opaque name normally lives beside the full API socket. When that directory would exceed portable Unix-socket path limits, Herdr uses a compact endpoint in a temporary directory instead. The endpoint identity changes on restart, so a stale reverse forward cannot reconnect to a replacement server; clients must not derive or cache its path. It exposes neither terminal reads nor detection previews. Herdr does not forward the full JSON API socket or the private binary client socket. Setup and remote-agent status projection use individual `herdr api bridge` commands over the already authenticated SSH connection instead of publishing either full transport.
+
+A plain pane `ssh` bridge is released when that foreground SSH attach ends. The wrapper renews a 15-second server lease while it runs, so killing or crashing the wrapper releases the bridge after the lease expires. Losing the bridge also ends the delegated attach and terminates its remote pane unless that pane already completed `remote-handoff`. The incoming reverse registration has a separate 15-second lease that is renewed only after a successful agent-metadata refresh. If the origin crashes or the network is lost, the destination removes that ghost peer. A bridge created for `agent start --ssh` lives with its local owner pane and has the same destructive lifecycle.
+
+Concurrent connections to the same peer are tracked independently, and removing one does not terminate the others. During shutdown, every bridge checks that the remote registration still points to its own forwarded socket before unregistering it, so cleanup cannot remove a surviving bridge's newer registration. Socket and control-connection cleanup continues on a detached worker. Peer links are runtime state, not durable machine pairings: `herdr peer health <peer_id>` refreshes status, `herdr peer unregister <peer_id>` removes all active bridges for that peer, and a server restart requires reconnecting. Active or pending presentations, active links, and detached cleanup block server live handoff; after handing back or closing remote panes and unregistering the final peer, wait briefly for cleanup to finish before retrying. Delegated panes owned through a removed or expired route are terminated rather than left running invisibly. Rerun supported `ssh` to create a fresh remote shell, or hand off before disconnecting when the existing pane must survive.
+
 ## Direct terminal attach
 
 Full Herdr attach opens the whole workspace UI. Direct attach opens one server-owned terminal in your current terminal.

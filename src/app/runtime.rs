@@ -42,6 +42,7 @@ impl App {
     pub(crate) fn shutdown_detached_terminal_runtimes(&mut self) {
         let terminal_ids = std::mem::take(&mut self.state.terminal_runtime_shutdowns);
         for terminal_id in terminal_ids {
+            self.release_remote_terminal_bridge(&terminal_id);
             if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
                 runtime.shutdown();
             }
@@ -68,6 +69,14 @@ impl App {
             crate::api::schema::Method::ServerStop(_)
                 | crate::api::schema::Method::ServerLiveHandoff(_)
         );
+        if self.should_defer_remote_api_request(&msg.request) {
+            self.handle_deferred_remote_api_request(msg);
+            if !skip_default_workspace {
+                changed |= self.ensure_default_workspace();
+            }
+            self.sync_prefix_input_source(previous_mode);
+            return changed;
+        }
         if matches!(
             &msg.request.method,
             crate::api::schema::Method::WorktreeCreate(_)
@@ -200,6 +209,10 @@ impl App {
         let mut resized = false;
 
         self.sync_animation_timer(now);
+        changed |= self.expire_ssh_shell_bridge_leases(now);
+        changed |= self.expire_incoming_peer_leases(now);
+        changed |= self.expire_remote_owner_leases(now);
+        changed |= self.expire_remote_presentations(now);
 
         if now >= self.next_resize_poll {
             resized = self.handle_resize_poll();
@@ -566,6 +579,9 @@ impl App {
             self.session_save_deadline,
             self.selection_autoscroll_deadline,
             self.selection_highlight_clear_deadline,
+            self.next_ssh_shell_bridge_deadline(),
+            self.next_incoming_peer_deadline(),
+            self.next_remote_owner_deadline(),
             render_deadline,
         ]
         .into_iter()
@@ -597,7 +613,10 @@ impl App {
 
     pub(crate) fn drain_all_internal_events(&mut self) -> bool {
         let mut had_event = false;
-        while self.drain_internal_events_up_to(super::APP_EVENT_DRAIN_LIMIT) {
+        for _ in 0..super::APP_EVENT_EXHAUSTIVE_DRAIN_BATCH_LIMIT {
+            if !self.drain_internal_events_up_to(super::APP_EVENT_DRAIN_LIMIT) {
+                break;
+            }
             had_event = true;
         }
         had_event
@@ -701,6 +720,70 @@ mod tests {
             is_focused: true,
         });
         (app, pane_id)
+    }
+
+    #[tokio::test]
+    async fn detached_runtime_cleanup_releases_a_pending_direct_ssh_bridge() {
+        let (mut app, pane_id) = test_app_with_pane();
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("terminal")
+            .clone();
+        app.terminal_runtimes.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+        let peer = crate::api::schema::PeerInfo {
+            id: "remote".into(),
+            label: "remote".into(),
+            status: crate::api::schema::PeerStatus::Connected,
+            transport: crate::api::schema::PeerTransportInfo::Ssh {
+                target: "remote".into(),
+                ssh_args: Vec::new(),
+                managed_control_path: None,
+                session: None,
+            },
+        };
+        let connection_id = app.peer_bridges.entry(peer.id.clone()).or_default().push(
+            crate::remote_agent::PeerBridgeRuntime::test("connection", &peer.id),
+        );
+        app.state.peers.insert(peer.id.clone(), peer.clone());
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        app.pending_owner_activations.insert(
+            "delegation".into(),
+            crate::app::PendingOwnerActivation {
+                terminal_id: terminal_id.clone(),
+                peer_id: peer.id.clone(),
+                connection_id,
+                peer,
+                delegation: crate::api::schema::TerminalDelegationInfo {
+                    delegation_id: "delegation".into(),
+                    epoch: 1,
+                    terminal_id: "remote-terminal".into(),
+                    pane_id: "remote-pane".into(),
+                    origin_peer_id: "remote".into(),
+                    owner: crate::api::schema::TerminalPresentationOwner {
+                        peer_id: "owner".into(),
+                        pane_id: "owner-pane".into(),
+                        route: vec!["owner".into(), "remote".into()],
+                    },
+                    status: crate::api::schema::TerminalDelegationStatus::Pending,
+                },
+                release_bridge_on_owner_close: true,
+                cancelled: std::sync::Arc::clone(&cancelled),
+            },
+        );
+        app.state
+            .terminal_runtime_shutdowns
+            .push(terminal_id.clone());
+
+        app.shutdown_detached_terminal_runtimes();
+
+        assert!(app.pending_owner_activations.is_empty());
+        assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!app.peer_bridges.contains_key("remote"));
+        assert!(app.terminal_runtimes.get(&terminal_id).is_none());
     }
 
     #[test]

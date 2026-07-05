@@ -858,12 +858,16 @@ pub struct RemoteConfig {
     /// Add keepalive fallbacks and private connection reuse for `herdr --remote`.
     /// Set false to run plain ssh unchanged. Default: true.
     pub manage_ssh_config: bool,
+    /// Intercept interactive `ssh <host>` inside Herdr panes and attach to the remote Herdr server.
+    /// Default: true.
+    pub ssh_integration: bool,
 }
 
 impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             manage_ssh_config: true,
+            ssh_integration: true,
         }
     }
 }

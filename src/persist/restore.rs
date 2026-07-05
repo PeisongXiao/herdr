@@ -122,19 +122,46 @@ pub fn handoff_pane_aliases(
     snapshot: &SessionSnapshot,
     workspaces: &[Workspace],
 ) -> HashMap<u32, PaneId> {
-    let mut aliases = HashMap::new();
+    handoff_pane_id_map(snapshot, workspaces)
+        .into_iter()
+        .filter(|(old_id, new_id)| *old_id != new_id.raw())
+        .collect()
+}
+
+#[cfg(unix)]
+pub fn handoff_public_pane_aliases(
+    snapshot: &SessionSnapshot,
+    workspaces: &[Workspace],
+    public_aliases: &HashMap<String, u32>,
+) -> HashMap<String, PaneId> {
+    let pane_ids = handoff_pane_id_map(snapshot, workspaces);
+    public_aliases
+        .iter()
+        .filter_map(|(public_id, old_id)| {
+            pane_ids
+                .get(old_id)
+                .copied()
+                .map(|pane_id| (public_id.clone(), pane_id))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn handoff_pane_id_map(
+    snapshot: &SessionSnapshot,
+    workspaces: &[Workspace],
+) -> HashMap<u32, PaneId> {
+    let mut pane_ids = HashMap::new();
     for (ws_snap, workspace) in snapshot.workspaces.iter().zip(workspaces) {
         for (tab_snap, tab) in ws_snap.tabs.iter().zip(&workspace.tabs) {
             let old_ids = collect_snapshot_pane_ids(&tab_snap.layout);
             let new_ids = tab.layout.pane_ids();
             for (old_id, new_id) in old_ids.into_iter().zip(new_ids) {
-                if old_id != new_id.raw() {
-                    aliases.insert(old_id, new_id);
-                }
+                pane_ids.insert(old_id, new_id);
             }
         }
     }
-    aliases
+    pane_ids
 }
 
 #[cfg(unix)]
@@ -914,6 +941,152 @@ mod tests {
     #[cfg(not(windows))]
     fn test_restore_shell() -> &'static str {
         "/bin/sh"
+    }
+
+    #[cfg(unix)]
+    fn legacy_remote_snapshot(cwd: &std::path::Path) -> SessionSnapshot {
+        let raw = serde_json::json!({
+            "version": super::super::snapshot::SNAPSHOT_VERSION,
+            "workspaces": [{
+                "id": "workspace",
+                "identity_cwd": cwd,
+                "tabs": [{
+                    "layout": { "Pane": 0 },
+                    "panes": {
+                        "0": {
+                            "cwd": cwd,
+                            "remote_agent": {
+                                "type": "ssh",
+                                "target": "remote.example",
+                                "remote_terminal_id": "remote-terminal",
+                                "remote_pane_id": "remote-pane"
+                            },
+                            "launch_argv": [
+                                "ssh",
+                                "remote.example",
+                                "herdr agent attach remote-terminal"
+                            ]
+                        }
+                    },
+                    "zoomed": false,
+                    "focused": 0,
+                    "root_pane": 0
+                }],
+                "active_tab": 0
+            }],
+            "active": 0,
+            "selected": 0
+        });
+
+        super::super::snapshot::parse_snapshot(&raw.to_string()).unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn live_handoff_rebinds_public_pane_aliases_to_imported_panes() {
+        let snapshot = legacy_remote_snapshot(&std::env::current_dir().unwrap());
+        let workspace = Workspace::test_new("restored");
+        let restored_pane_id = workspace.tabs[0].root_pane;
+        let public_aliases = HashMap::from([("old-workspace:p1".to_string(), 0)]);
+
+        let rebound = handoff_public_pane_aliases(&snapshot, &[workspace], &public_aliases);
+
+        assert_eq!(rebound.get("old-workspace:p1"), Some(&restored_pane_id));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn legacy_remote_snapshot_restores_a_safe_shell() {
+        let snapshot = legacy_remote_snapshot(&std::env::current_dir().unwrap());
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let (_workspaces, terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            true,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let terminal = terminals
+            .values()
+            .next()
+            .expect("remote pane should restore as a shell");
+        assert!(terminal.remote_agent_transport.is_none());
+        assert!(terminal.launch_argv.is_none());
+        assert!(!terminal.respawn_shell_on_exit);
+
+        for (_, runtime) in runtimes {
+            runtime.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn legacy_remote_snapshot_does_not_discard_an_imported_handoff_pty() {
+        use portable_pty::{native_pty_system, PtySize};
+
+        let snapshot = legacy_remote_snapshot(&std::env::current_dir().unwrap());
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let master_fd = crate::pty::fd::duplicate_fd(
+            pair.master
+                .as_raw_fd()
+                .expect("test PTY should expose its master fd"),
+        )
+        .unwrap();
+        let mut imports = HashMap::from([(
+            0,
+            crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd,
+                state: crate::handoff_runtime::HandoffRuntimeState {
+                    pane_id: 0,
+                    child_pid: 0,
+                    rows: 24,
+                    cols: 80,
+                    cell_width_px: 0,
+                    cell_height_px: 0,
+                    keyboard_protocol_flags: 0,
+                    keyboard_protocol_ansi: None,
+                    input_state: None,
+                    initial_history_ansi: None,
+                },
+            },
+        )]);
+
+        let (_workspaces, terminals, runtimes) = restore_handoff(
+            &snapshot,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            &mut imports,
+            mpsc::channel(4).0,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("handoff restore should consume the imported remote pane PTY");
+
+        assert!(imports.is_empty());
+        assert_eq!(runtimes.len(), 1);
+        assert!(terminals
+            .values()
+            .all(|terminal| terminal.remote_agent_transport.is_none()));
+
+        for (_, runtime) in runtimes {
+            runtime.shutdown();
+        }
     }
 
     #[test]

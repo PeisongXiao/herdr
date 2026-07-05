@@ -8,6 +8,7 @@ pub(super) fn run_api_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "schema" => api_schema(&args[1..]),
+        "bridge" => api_bridge(&args[1..]),
         "help" | "--help" | "-h" => {
             print_api_help();
             Ok(0)
@@ -17,6 +18,78 @@ pub(super) fn run_api_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn api_bridge(args: &[String]) -> std::io::Result<i32> {
+    let shell_context = match args {
+        [] => false,
+        [flag] if flag == "--shell-context" => true,
+        _ => {
+            eprintln!("usage: herdr api bridge [--shell-context]");
+            return Ok(2);
+        }
+    };
+
+    let mut request = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut request)?;
+    if request.trim().is_empty() {
+        return Ok(0);
+    }
+    if shell_context {
+        request = inject_terminal_delegate_shell_context(
+            &request,
+            &std::env::current_dir()?,
+            std::env::vars(),
+        )?;
+    }
+
+    let mut stream = crate::ipc::connect_local_stream(&crate::api::socket_path())?;
+    std::io::Write::write_all(&mut stream, request.as_bytes())?;
+    std::io::Write::flush(&mut stream)?;
+
+    let mut stdout = std::io::stdout().lock();
+    std::io::copy(&mut stream, &mut stdout)?;
+    std::io::Write::flush(&mut stdout)?;
+    Ok(0)
+}
+
+fn inject_terminal_delegate_shell_context(
+    request: &str,
+    cwd: &std::path::Path,
+    env: impl IntoIterator<Item = (String, String)>,
+) -> std::io::Result<String> {
+    let mut value: serde_json::Value = serde_json::from_str(request)?;
+    if value["method"].as_str() != Some("terminal.delegate.create") {
+        return Ok(request.to_string());
+    }
+    let params = value
+        .get_mut("params")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "terminal.delegate.create requires object params",
+            )
+        })?;
+    if params.get("cwd").is_none_or(serde_json::Value::is_null) {
+        params.insert(
+            "cwd".into(),
+            serde_json::Value::String(cwd.display().to_string()),
+        );
+    }
+    let mut inherited = serde_json::Map::new();
+    for (key, value) in env {
+        if !key.starts_with("HERDR_") {
+            inherited.insert(key, serde_json::Value::String(value));
+        }
+    }
+    if let Some(explicit) = params.get("env").and_then(serde_json::Value::as_object) {
+        inherited.extend(explicit.clone());
+    }
+    params.insert("env".into(), serde_json::Value::Object(inherited));
+    let mut encoded = serde_json::to_string(&value)?;
+    encoded.push('\n');
+    Ok(encoded)
 }
 
 fn api_schema(args: &[String]) -> std::io::Result<i32> {
@@ -84,6 +157,7 @@ fn schema_summary_text() -> std::io::Result<String> {
 fn print_api_help() {
     eprintln!("herdr api commands:");
     eprintln!("  herdr api schema [--json | --output PATH]");
+    eprintln!("  herdr api bridge");
 }
 
 fn print_api_schema_help() {
@@ -98,5 +172,36 @@ mod tests {
         assert!(text.contains("Herdr API schema"));
         assert!(text.contains("Use `herdr api schema --json`"));
         assert!(text.len() < 400);
+    }
+
+    #[test]
+    fn shell_context_injection_only_changes_fresh_terminal_delegation() {
+        let request = r#"{"id":"create","method":"terminal.delegate.create","params":{"label":"remote","env":{"EXPLICIT":"yes"},"owner":{"peer_id":"a","pane_id":"p","route":["a"]}}}"#;
+        let injected = super::inject_terminal_delegate_shell_context(
+            request,
+            std::path::Path::new("/remote/home"),
+            [
+                ("SSH_AUTH_SOCK".into(), "/tmp/ssh.sock".into()),
+                ("HERDR_SOCKET_PATH".into(), "/tmp/wrong.sock".into()),
+                ("EXPLICIT".into(), "inherited".into()),
+            ],
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&injected).unwrap();
+        assert_eq!(value["params"]["cwd"], "/remote/home");
+        assert_eq!(value["params"]["env"]["SSH_AUTH_SOCK"], "/tmp/ssh.sock");
+        assert_eq!(value["params"]["env"]["EXPLICIT"], "yes");
+        assert!(value["params"]["env"].get("HERDR_SOCKET_PATH").is_none());
+
+        let ping = "{\"id\":\"ping\",\"method\":\"ping\",\"params\":{}}\n";
+        assert_eq!(
+            super::inject_terminal_delegate_shell_context(
+                ping,
+                std::path::Path::new("/ignored"),
+                std::iter::empty(),
+            )
+            .unwrap(),
+            ping
+        );
     }
 }
