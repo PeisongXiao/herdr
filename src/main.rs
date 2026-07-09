@@ -64,6 +64,8 @@ mod cli;
 mod client;
 mod config;
 #[cfg(target_os = "macos")]
+mod desktop_mcp;
+#[cfg(target_os = "macos")]
 mod desktop_queue;
 mod detect;
 mod events;

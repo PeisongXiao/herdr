@@ -47,6 +47,13 @@ portable-pty = { path = "vendor/portable-pty" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 getrandom = "=0.3.4"
+rmcp = { version = "=2.2.0", default-features = false, features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-io",
+] }
+tokio = { version = "1", features = ["io-std", "io-util"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

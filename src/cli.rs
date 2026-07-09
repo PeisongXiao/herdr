@@ -20,6 +20,8 @@ mod completion;
 #[cfg(target_os = "macos")]
 mod desktop;
 mod integration;
+#[cfg(target_os = "macos")]
+mod mcp;
 mod notification;
 mod pane;
 mod peer;
@@ -76,6 +78,8 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     let exit_code = match command {
         #[cfg(target_os = "macos")]
         "desktop" => desktop::run_desktop_command(&args[2..])?,
+        #[cfg(target_os = "macos")]
+        "mcp" => mcp::run_mcp_command(&args[2..])?,
         "server" => {
             let Some(exit_code) = server::run_server_command(&args[2..])? else {
                 return Ok(CommandOutcome::NotCli);
