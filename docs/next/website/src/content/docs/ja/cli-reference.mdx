@@ -40,9 +40,10 @@ API スキーマコマンド:
 herdr api schema
 herdr api schema --json
 herdr api schema --output herdr-api.schema.json
+herdr api bridge
 ```
 
-`herdr api schema` は、インストール済みバイナリに同梱されたソケットプロトコルスキーマの短い概要を表示します。完全な JSON Schema ドキュメントが欲しいときは `--json` を使い、ファイルに書き出すには `--output PATH` を使ってください。
+`herdr api schema` は、インストール済みバイナリに同梱されたソケットプロトコルスキーマの短い概要を表示します。完全な JSON Schema ドキュメントが欲しいときは `--json` を使い、ファイルに書き出すには `--output PATH` を使ってください。`api bridge` は stdin から最初の JSON request を読み、local full API socket に転送して response を stdout へ stream します。federation setup と remote-agent status projection のため認証済み SSH command から使われますが、long-lived peer link が full API socket を公開することはありません。
 
 ## シェル補完
 
@@ -80,6 +81,7 @@ compinit
 
 ```bash
 herdr server
+herdr server ensure [--json]
 herdr server stop
 herdr server reload-config
 herdr server agent-manifests [--json]
@@ -87,7 +89,7 @@ herdr server update-agent-manifests [--json]
 herdr server reload-agent-manifests
 ```
 
-`herdr server` はヘッドレスサーバーを明示的に起動します。監視下やサービス的な構成で使ってください。`reload-config` はペインを再起動せずにリロード可能な設定を適用します。`agent-manifests` は、アクティブなエージェント検出マニフェストのソース、キャッシュされたリモートバージョン、直近のリモート更新結果を表示します。`update-agent-manifests` はリモートマニフェストの更新を即座に取得し、実行中のサーバーにリロードして、更新後のマニフェスト状態を表示します。生のステータスレスポンスが欲しいときは `--json` を渡してください。`reload-agent-manifests` は、ローカルオーバーライドの編集後にエージェント検出マニフェストを実行中のサーバーにリロードします。
+`herdr server` はヘッドレスサーバーを明示的に起動します。監視下やサービス的な構成で使ってください。`ensure` はサーバーが未起動の場合だけバックグラウンドサーバーを起動します。`server stop` は remotely presented pane を終了する場合に警告するため、残す必要があれば先にそのペイン内で `herdr remote-handoff` を実行します。`reload-config` はペインを再起動せずにリロード可能な設定を適用します。`agent-manifests` は、アクティブなエージェント検出マニフェストのソース、キャッシュされたリモートバージョン、直近のリモート更新結果を表示します。`update-agent-manifests` はリモートマニフェストの更新を即座に取得し、実行中のサーバーにリロードして、更新後のマニフェスト状態を表示します。生のステータスレスポンスが欲しいときは `--json` を渡してください。`reload-agent-manifests` は、ローカルオーバーライドの編集後にエージェント検出マニフェストを実行中のサーバーにリロードします。
 
 ## 通知
 
@@ -243,16 +245,28 @@ herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
 herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
 herdr agent attach <target> [--takeover]
-herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+herdr agent start <name> [--agent AGENT] [--peer PEER] [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] [--ssh TARGET] [--ssh-session NAME] [--no-remote-integration] -- <argv...>
 herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
+herdr ssh <ssh-args...>
+herdr remote-handoff
 ```
 
-エージェントターゲットには、ターミナル ID、一意なエージェント名、検出または報告されたエージェントラベル、レガシーなペイン ID が使えます。名前とラベルはエージェントのアイデンティティです。ターミナル ID とレガシーペイン ID は低レベルな逃げ道です。
+エージェントターゲットには、ターミナル ID、一意なエージェント名、検出または報告されたエージェントラベル、`peer::target`、レガシーなペイン ID が使えます。名前とラベルはエージェントのアイデンティティです。ターミナル ID とレガシーペイン ID は低レベルな逃げ道です。
 
 `agent read` は解決されたターミナルストリームを読みます。`agent send` はそのストリームにリテラルのテキストを書き込みます。`agent get`、`agent focus`、`agent wait`、`agent attach` は、解決されたターミナルがエージェントのアイデンティティを持つことを要求します。`agent rename` はそのアイデンティティを割り当てられます。
 
 `agent explain` は、スクリーン検出が使うのと同じ下部バッファの検出スナップショットの分類を実行中のサーバーに依頼します。そのためライブの出力はサーバーのアクティブなマニフェストキャッシュを反映します。これは `agent.explain` ソケットメソッドを使うので、Herdr のアップグレード後にライブ explain を使う前に、サーバーを再起動するか更新済みサーバーへハンドオフしてください。保存済みフィクスチャをローカルで説明するには `--file PATH --agent LABEL` を使います。デフォルトの出力には、エージェント、最終状態、マニフェストのソースとバージョン、リージョンの証拠付きでマッチしたルール、そしてフォールバック・スキップ・警告の理由が表示されます。`--verbose` を付けると、可視の証拠フラグ、キャッシュされたリモートバージョン、ローカルオーバーライドのシャドーイング、リモート更新状況、マッチャーとリージョンの証拠付きの評価済みルール全リストが表示されます。issue の報告やテストには `--json` を付けてください。
+
+`agent start --ssh TARGET` は Unix-only です。remote `PATH` と既知の user/system、Homebrew、mise、Nix location から Herdr を探し、必要なら互換 daemon を起動し、agent を remote で起動して pane を local workspace へ委譲します。remote binary の bootstrap/install/update は行いません。`--agent AGENT` が公式 integration を選び、省略時は `argv[0]` を認識します。setup を省くには `--no-remote-integration` を使います。default remote session は明示的に `default` で、named session は `--ssh-session NAME` だけが選びます。SSH option は config に置き、CLI/server は managed SSH 前に対話意味を変える有効 config を拒否します。
+
+delegated pane は presentation owner が一つだけで、local presentation 中は remote workspace から除かれます。owner pane の close、owner server の stop、SSH loss は remote pane と agent を終了し、shell として復元したり later reattach を待ったりしません。残すには先にそのペイン内で `herdr remote-handoff` を実行します。
+
+SSH start は runtime peer も登録します。initiator は peer agent の list/get/read/explain/send/rename/wait/attach/start が可能ですが、restricted reverse link は ping/list/get と presentation activation acknowledgment だけを許可し、origin terminal/detection preview の read、input、process launch はできません。`agent focus` は別 server の focus を変えないため attach を使います。peer attach は owner になるペインから実行し、既存 presentation は明示的 `--takeover` がなければ拒否します。takeover は以前の owner を置き換えるだけです。deeper remote presentation を持つ中間ペインは先にそれを解消します。`agent start --peer PEER` は SSH trust direction に沿って peer 上で agent を起動しますが local presentation はせず、`--focus` を受けません。
+
+Unix の Herdr ペイン内では destination-only interactive `ssh TARGET` が `herdr ssh` に route されます。一般的な `-p`、`-i`、`-J`、`-F`、`-A`、`-4`/`-6` と互換 `-o` は保持され、OpenSSH が foreground 認証した接続を Herdr が再利用して protocol/capability を検証し、restricted peer bridge と remote `default` session の shell を準備します。remote command、forwarding/tunnel、`-N`、`-f`、`-s`、`-T`、effective config の同等な意味は raw argv のまま実際の `ssh` に渡されます。pane setup failure は警告後 fallback し、explicit agent/API start は失敗します。`scp`/`sftp` は変更されません。`ssh_integration = false` または `HERDR_SSH_BYPASS=1` で迂回します。
+
+reverse peer bridge には SSH daemon と `authorized_keys` による remote Unix-socket forwarding の許可が必要です。拒否時は policy reason を含む `remote peer bridge failed` を保ちます。activation 後の managed presentation は destructive で、disconnect、owner close、owner server stop は remote pane を終了します。nested SSH は同じ owner を前へ渡します。`herdr remote-handoff` は引数を取らず、現在の delegated pane 内だけで最内層の live pane を実際の host の新 workspace へ戻し、old owner pane を閉じます。server replacement の `--handoff` とは別です。
 
 通常のターミナル、サーバー、テスト、シェル、低レベルなターミナル制御には `pane send-text`、`pane send-keys`、`pane run`、`terminal attach` を使ってください。Enter 付きでコマンドを送信したいときは `pane run` を使います。
 
@@ -260,12 +274,26 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 
 ```bash
 herdr terminal attach <terminal_id> [--takeover]
+herdr terminal shell [--label LABEL]
+herdr terminal session control <target> [--takeover] [--cols N] [--rows N]
+herdr terminal session observe <target> [--cols N] [--rows N]
 herdr terminal title set <title>
 herdr terminal title clear
 ```
 
 ダイレクトアタッチからは `ctrl+b q` でデタッチします。リテラルの `ctrl+b` は `ctrl+b ctrl+b` で送ります。
+`terminal shell` は caller の cwd/env から server-owned shell tab を作り、Herdr 内部 routing variable を除いて attach します。managed pane SSH は代わりに exclusive terminal delegation を準備し、`terminal attach` で commit します。
 `terminal title clear` は Herdr のデフォルトの外側ターミナルウィンドウタイトルを復元します。
+
+## Peers
+
+```bash
+herdr peer list
+herdr peer health <peer_id>
+herdr peer unregister <peer_id>
+```
+
+peer は Herdr ペイン内の `ssh TARGET` または `agent start --ssh` が作る runtime link です。`list` は生成 id、`health` は reachability refresh、`unregister` はその peer の managed bridge をすべて削除します。plain SSH bridge は foreground attach とともに閉じ、wrapper が 15 秒 lease を 3 秒ごとに renew するため crash も回収されます。peer は persistent pairing ではなく、server restart 後は再接続が必要です。active/pending presentation、peer link、background cleanup は server live handoff を block します。
 
 ## Wait
 

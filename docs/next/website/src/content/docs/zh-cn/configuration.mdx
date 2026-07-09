@@ -115,9 +115,16 @@ worktree 操作在 Git 工作区行上可用。`New worktree` 创建一个检出
 ```toml
 [remote]
 manage_ssh_config = true
+ssh_integration = true
 ```
 
 启用时,`herdr --remote` 写入一个私有的临时 SSH 配置: 先包含你的 `~/.ssh/config` 和 `/etc/ssh/ssh_config`,再添加兜底的 `ServerAliveInterval` 和 `ServerAliveCountMax` 值。你自己的 SSH 保活设置优先。设置 `manage_ssh_config = false` 用普通 `ssh` 运行桥接,不使用 Herdr 生成的配置。
+
+在 Unix 上,`ssh_integration` 会把一个轻量的 `ssh` shim 放到每个 Herdr 窗格的 `PATH` 前面。仅含目标地址的交互式 `ssh TARGET` 会继续由前台 OpenSSH 处理认证,随后查找或启动兼容的远程 Herdr 守护进程,并把远程默认会话中的 shell 独占委派到当前窗格。远程主机必须已经安装支持 peer federation 与 remote presentation 的兼容 Herdr;设置失败时会警告并按原始参数回退到普通 SSH。远程命令、非交互或无会话模式、转发、隧道和本地命令语义始终原样交给真实 `ssh`;Herdr 也会检查由 `Host`、`Match` 和 `Include` 得到的有效 SSH 配置,不会为了强制集成而覆盖它。
+
+对于新建的 macOS login-zsh 窗格,包括默认的 `shell_mode = "auto"`,Herdr 使用一次性的私有启动钩子。它先恢复用户原本的 `ZDOTDIR` 和启动文件,等 `path_helper` 等登录初始化结束后,在第一个提示符重新把 shim 放到 `PATH` 前面并执行 `rehash`,随后自我移除。用户别名和函数仍按正常优先级工作,`/usr/bin/ssh` 这样的绝对路径会绕过 shim。已经运行的窗格要在重建后才获得新环境。
+
+此设置与 `manage_ssh_config` 相互独立: 窗格 SSH 集成始终使用自己的临时 OpenSSH 控制连接,而 `manage_ssh_config` 只控制 `herdr --remote`。设置 `ssh_integration = false` 可完全保留原始窗格 `ssh`,单次绕过则使用 `HERDR_SSH_BYPASS=1 ssh TARGET`。支持的命令形式、远程发现和 peer 链接边界见[持久化与远程访问](/zh-cn/docs/persistence-remote/)。
 
 ## 按键绑定
 

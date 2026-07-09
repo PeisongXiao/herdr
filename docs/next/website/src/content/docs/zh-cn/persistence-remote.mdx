@@ -93,6 +93,149 @@ HERDR_REMOTE_BINARY=target/release/herdr herdr --remote workbox
 herdr --remote workbox --session agents
 ```
 
+## 从 Herdr 窗格内使用 SSH
+
+在 Unix 上,最直接的工作流从本地 Herdr 会话开始:
+
+```bash
+herdr
+# 在 Herdr 窗格内
+ssh workbox
+```
+
+OpenSSH 在前台正常完成认证。Herdr 随后查找或启动远程 Herdr 守护进程,验证所需协议与能力,连接两台服务器,并在执行 `ssh` 的窗格中展示一个新的远程 shell。这个托管 shell 明确属于远程 Herdr 会话 `default`;你无需启动第二个 TUI 或选择远程 socket。
+
+该工作流委派窗格而不是镜像窗格。进程和 PTY 留在远程主机,但窗格同一时间只出现在一台机器的工作区中;本地 Herdr 展示它时,远程守护进程会把它从自己的工作区列表移除。下面的[窗格所有权与生命周期](#窗格所有权与生命周期)解释为什么此路径会在断开时有意销毁窗格,以及如何用 `herdr remote-handoff` 保留它。
+
+## SSH 智能体会话
+
+希望操作体验像启动本地智能体,但进程实际运行在远程 Herdr 服务器时,使用:
+
+```bash
+herdr agent start reviewer --ssh workbox --agent opencode --cwd /repo -- opencode
+```
+
+这条 federation 路径目前仅支持 Unix。本地服务器使用 OpenSSH 认证,必要时启动远程服务器,检查协议、peer federation 和 remote presentation 能力,可选地准备官方智能体集成,再在远程启动智能体并把窗格委派到本地工作区。CLI 在打开托管 SSH 前拒绝改变交互式会话语义的有效 SSH 配置;服务器对 SSH-backed agent 和 API 请求执行同样检查。
+
+委派窗格与 peer bridge 都只是运行时状态,并不是可分离的远程会话。关闭本地所有者窗格、停止本地 Herdr 服务器或丢失 SSH transport 会终止远程窗格和智能体。要让工作继续留在远程主机,请在断开前从展示窗格内运行 `herdr remote-handoff`。这个 terminal handoff 不同于更新和 `herdr --remote` 使用的服务器替换 `--handoff`。
+
+Herdr 优先使用 `--agent AGENT` 选择集成,省略时识别 argv 的第一个命令。hook 已由其他方式管理或命令不是受支持智能体时,用 `--no-remote-integration`。`--ssh` 接受 SSH 目标而不是任意 SSH 选项;端口、identity、jump host 等应写入 `~/.ssh/config`。命名远程会话使用:
+
+```bash
+herdr agent start reviewer --ssh workbox --ssh-session agents --agent opencode --cwd /repo -- opencode
+```
+
+直接 SSH federation 的会话选择是显式的。`agent start --ssh workbox` 和窗格内 `ssh workbox` 都显式传递远程 `default`,所以继承或 SSH 接受的 `HERDR_SESSION`、`HERDR_SOCKET_PATH`、`HERDR_CLIENT_SOCKET_PATH` 不能重定向设置、API 或最终 attach。命名会话必须使用 `--ssh-session NAME`;plain pane SSH 不会从本地状态、环境或 SSH 配置选择它。
+
+与 `herdr --remote` 不同,直接 federation 不会复制、下载、安装或替换远程 Herdr。发现顺序是:
+
+1. 远程 `PATH` 中的 `herdr`
+2. `~/.local/bin/herdr`
+3. 常见系统、Homebrew/Linuxbrew、mise 与 Nix profile 路径
+
+因此即使 `~/.local/bin` 不在非交互 SSH 的 `PATH` 中,也能发现 `install-local.sh` 的默认目标。没有二进制时会给出明确安装提示;远程协议不同或缺少任一能力时会要求两端更新。显式 agent/API 启动会失败而不会悄悄变成普通 shell;窗格 shim 会报告原因、清理私有连接,再按原始 argv 运行真实 SSH。
+
+完整双向感知还要求 SSH 允许为该账号远程转发 Unix-domain socket。若受限,同时检查 daemon 的 forwarding 策略、账号规则以及 `authorized_keys` 中附加到密钥的选项。被拒绝时,Herdr 保留说明 remote Unix-socket forwarding 和具体策略原因的 `remote peer bridge failed` 诊断。显式 agent/API 启动停止,窗格 shim 则显示相同诊断后回退到原始 SSH。
+
+peer 注册后,发起端可以操作远程智能体,而远端只获得发起端智能体的元数据感知:
+
+```bash
+herdr agent list
+herdr agent read workbox::reviewer
+herdr agent attach workbox::reviewer
+herdr peer health workbox
+```
+
+peer id 来自 SSH target、选项和远程会话。尤其在使用命名会话时,请以 `herdr peer list` 的输出为准,不要假设固定 id。
+
+## SSH 集成细节
+
+Unix 上,Herdr 会把一个小型 `ssh` shim 放在每个窗格的 `PATH` 前面。受支持的交互式 SSH 会使用远程 Herdr,而不是留下非托管 raw shell:
+
+```bash
+ssh workbox
+ssh -p 2222 -i ~/.ssh/workbox -J bastion -A you@workbox
+```
+
+在新建的 macOS login-zsh 窗格中,包括默认 `shell_mode = "auto"`,私有的一次性启动钩子会让 shim 保持在 `/usr/libexec/path_helper` 改写后的路径之前。它先恢复用户原始 `ZDOTDIR` 与启动文件,再在第一个提示符重新 prepend shim、运行 `rehash` 并移除自己。别名和函数保留正常优先级,`/usr/bin/ssh` 这样的绝对路径仍按字面执行。升级前已经运行的窗格在重建前不变。
+
+Herdr 先让真实 OpenSSH 建立连接,因此 host-key、密码、密钥口令和 MFA 始终留在前台终端,Herdr 从不读取凭据。认证成功后,OpenSSH 后台化一个私有 control master;Herdr 复用它执行发现、服务器/能力检查、反向 peer bridge 和最终 terminal attach,密码主机通常只提示一次。托管连接也带 SSH keepalive。
+
+最终 SSH channel 从远程默认会话领取服务器所有的 shell 并直接 attach。该 shell 复制 SSH 命令的当前目录与环境,删除 Herdr 内部路由变量,保留 `SSH_CONNECTION`、接受的 locale 和转发的 `SSH_AUTH_SOCK`。远程 daemon 拥有进程,发起端 Herdr 窗格独占展示。显式启动命名会话智能体时使用 `--ssh-session NAME`。
+
+### 窗格所有权与生命周期
+
+托管远程窗格只有一个工作区所有者。A 展示由 B 的 Herdr daemon 运行的窗格时,B 会把它从自己的工作区移除;它不会同时出现在两个 TUI,也不是只读镜像。智能体状态与终端输入仍来自 B 上唯一的原生终端。
+
+这种所有权是生命周期契约,不是普通 Herdr detach 持久化。以下任一事件都会终止 B 上的委派窗格及其进程:
+
+- SSH attach 退出或网络丢失
+- A 上的所有者窗格关闭
+- A 的 Herdr 服务器停止或不能续租连接
+- delegation 被显式替换或终止
+
+已激活的托管 SSH 展示结束后,Herdr 会关闭原所有者窗格,不会恢复 SSH 前的 shell。如果最终 attach 在所有权提交前被拒绝,Herdr 会放弃准备好的远程 claim 并保留本地窗格。若需要客户端断开后仍保留整个远程会话,请使用普通 SSH 后运行远程 `herdr`,或使用 `herdr --remote`。
+
+### 把窗格留在真实主机
+
+结束连接前保留当前委派窗格,需在该窗格内运行:
+
+```bash
+herdr remote-handoff
+```
+
+`remote-handoff` 只作用于光标所在窗格,不接收 host、pane id 或 target。远程 daemon 会移除 delegation,把同一实时窗格放进真实主机上的新工作区;它不会合并到现有工作区,也不会改变已经 attach 的远程 TUI 焦点。托管 attach 随后结束并关闭旧所有者窗格。若该窗格拥有或正在准备更深的远程展示,Herdr 会拒绝中间层 handoff;先完成或取消设置,再 handoff 最内层窗格。之后可用 `herdr --remote workbox`,或普通 SSH 后运行 `herdr`,打开完整远程会话并选择新工作区。
+
+这和 update live handoff 无关:`herdr remote-handoff` 只把一个委派窗格放回主机工作区;`herdr update --handoff` 与 `herdr --remote --handoff` 替换服务器并尝试保留全部窗格。
+
+### 嵌套 SSH 与 takeover
+
+受支持的 SSH 在委派远程窗格内仍可继续集成:
+
+```bash
+ssh workbox
+# 现在位于委派的 workbox 窗格
+ssh gpu-box
+```
+
+每一跳连接该主机的 Herdr daemon 并向前传递现有展示所有者。原始可见窗格展示最内层 shell,中间与目标 daemon 将其委派窗格排除在本地工作区之外。断开或所有者停止会破坏性展开整条链。在 `gpu-box` 运行 `herdr remote-handoff` 只影响光标所在的最内层窗格: 它成为新的 `gpu-box` 工作区,外层 attach 随后展开。
+
+附加现有 peer 智能体使用相同的独占规则。若另一台机器已经展示它,默认拒绝移动。必须从将成为所有者的窗格执行,且只有确实要替换旧展示时才加:
+
+```bash
+herdr agent attach workbox::reviewer --takeover
+```
+
+旧所有者会断开,takeover 从不创建两个实时展示。若该窗格拥有更深的远程展示,先 handoff 或关闭更深窗格;Herdr 会拒绝中间 takeover,避免留下陈旧的传递所有者。plain managed `ssh` 创建全新远程 shell,不需要 takeover。
+
+### 支持的 SSH 形式
+
+Herdr 只集成能够在不改变语义的前提下识别为“仅目标地址”的交互式会话。
+
+| 形式 | 行为 |
+| --- | --- |
+| `ssh host`、`ssh user@host` | 集成 |
+| `-4`、`-6`、`-A`、`-a`、`-C`、`-F`、`-i`、`-J`、`-l`、`-p` 和兼容 `-o` 等常见连接/认证选项 | 集成并保留 |
+| `-t`、`-tt` 和兼容 TTY 设置 | 集成;最终 attach 始终请求 TTY |
+| `ssh host command ...` 或第二个位置参数 | 真实 `ssh` |
+| `-L`、`-R`、`-D`、`-W`、`-w`、`-N`、`-f`、`-s`、`-T` | 真实 `ssh` |
+| 由命令行 `-o` 或有效 SSH 配置产生的远程命令、转发、本地命令、非交互/子系统、后台或隧道语义 | 真实 `ssh` |
+| 未知或含糊的选项形式 | 真实 `ssh` |
+
+Herdr 会考虑目标的完整有效 OpenSSH 配置,包括 `Host`、`Match`、`Include`。若配置带有上述语义,shim 会把原始 argv 不加修改地交给真实 `ssh`,不会为了强制集成而删除设置。无法检查有效配置、访问本地 API 或完成托管设置时,窗格也走同一 fallback;显式 `agent start --ssh` 与 raw API federation 则在开始托管 SSH 前拒绝不安全配置,服务器端也会执行检查。
+
+`scp` 和 `sftp` 不被拦截。单次使用 `HERDR_SSH_BYPASS=1 ssh workbox`,或设置 `[remote].ssh_integration = false`,可关闭窗格 shim。`[remote].manage_ssh_config` 只影响 `herdr --remote`,不影响直接 SSH 集成。
+
+### Peer 边界与重新连接
+
+peer 链接让智能体元数据双向可见,但不会反转 SSH 的信任方向。发起 SSH 的机器可以列出、检查、读取、解释、发送、重命名、启动、等待和附加远程智能体。受限反向链接只允许远端 ping 发起端以及列出/读取智能体元数据;不能解释、预览检测、读取终端、发送输入、重命名或在发起端启动进程。
+
+SSH 反向转发指向当前服务器的、不透明且每次启动不同的受限 endpoint。它只接受 `ping`、`peer.agent.list`、`peer.agent.get` 和携带 delegation id/epoch 的 `peer.presentation.activate` 确认。其短不透明名称通常位于完整 API socket 旁;路径太长时使用临时目录中的短路径。服务器重启会改变身份,旧 forward 不能连接替换服务器,客户端不得推导或缓存该路径。它不暴露终端、检测预览、完整 JSON API 或私有 binary client socket。设置和远程状态投影通过已认证 SSH 内单独执行 `herdr api bridge`,而不是发布完整 transport。
+
+plain pane `ssh` bridge 随前台 attach 结束。wrapper 每三秒续租一次 15 秒 server lease,因此 kill/crash 后也会过期回收。失去 bridge 会结束委派 attach 并终止远程窗格,除非它已完成 `remote-handoff`。反向注册另有 15 秒 lease,只有成功刷新智能体元数据才续期;origin 崩溃或断网会移除 ghost peer。`agent start --ssh` 的 bridge 与本地所有者窗格同寿命。
+
+同一 peer 的并发连接独立跟踪,移除一个不会终止其他连接。清理时,每个 bridge 只有在远端注册仍指向自己的 forwarded socket 时才 unregister,因此旧清理不会抹掉替代连接。socket/control 清理在后台 worker 继续进行。peer 是运行时状态,不是持久配对:`peer health` 刷新状态,`peer unregister` 移除该 peer 的活动 bridge,服务器重启后必须重连。活动或 pending presentation、peer 链接及未完成清理会阻止 server live handoff。通过已移除或过期 route 拥有的委派窗格会被终止,不会隐形运行;需要保留时必须在断开前 handoff。
+
 ## 直接终端附加
 
 完整的 Herdr 连接会打开整个工作区 UI。直接附加则在你当前的终端中打开一个由服务器拥有的终端。

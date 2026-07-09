@@ -31,7 +31,23 @@ herdr
 herdr server stop
 ```
 
-## 通过普通 SSH 的远程工作
+## 从 Herdr 窗格内使用 SSH
+
+在 Linux 和 macOS 上,从本地工作切到远程工作的最短路径是:
+
+```bash
+herdr
+# 在 Herdr 窗格内运行
+ssh you@server
+```
+
+OpenSSH 会照常处理主机密钥、密码、密钥口令和 MFA。认证后,Herdr 自动查找或启动远程 Herdr 守护进程,连接两台服务器,并把当前窗格变成由远程默认 Herdr 会话提供的 shell。你不需要再启动一个 TUI,也不需要管理 socket。
+
+远程机器必须已经安装兼容且声明支持 peer federation 和独占 remote-pane presentation 的 Herdr;此路径不会安装或升级远程二进制。如果二进制缺失、协议或能力不兼容、Unix socket 反向转发被禁止,或托管设置失败,Herdr 会打印警告并按原始参数重新运行普通 SSH。
+
+托管 SSH 移动的是窗格的展示权,不会创建第二份副本。一个窗格同一时间只出现在一台机器的工作区中,其展示所有者也负责生命周期。关闭所有者窗格、停止其 Herdr 服务器或丢失 SSH 连接都会销毁远程委派窗格及其进程。断开前可在该窗格内运行 `herdr remote-handoff`,把光标所在窗格移回其真实主机的新工作区。嵌套 SSH 与显式 takeover 规则见[持久化与远程访问](/zh-cn/docs/persistence-remote/)。
+
+## 通过普通 SSH 运行 Herdr
 
 SSH 到有代码和凭据的机器,然后在那里运行 Herdr:
 
@@ -40,7 +56,7 @@ ssh you@server
 herdr
 ```
 
-这和终端复用器的用法一样。你的 shell 在远程,Herdr 服务器在远程,智能体和窗格都运行在远程机器上。用 `ctrl+b q` 分离并断开连接,之后再 SSH 回去,重新运行 `herdr`。
+这和终端复用器的用法一样。你的 shell 在远程,Herdr 服务器在远程,智能体和窗格都运行在远程机器上。用 `ctrl+b q` 分离并断开连接,之后再 SSH 回去,重新运行 `herdr`。如果从 Herdr 窗格内明确需要这条非托管路径,请用 `HERDR_SSH_BYPASS=1 ssh you@server`,或在 Herdr 外部发起 SSH。
 
 当你本来就工作在 SSH shell 里、在手机或平板的 SSH 客户端上,或者想要最简单的配置时,用这条路径。
 
@@ -98,6 +114,6 @@ herdr --remote workbox
 
 ## 该用哪条路径
 
-本地工作用 `herdr`。想让 Herdr 在远程 shell 上表现得像 tmux,或者在用手机 SSH 客户端时,用 `ssh you@server` 再 `herdr`。想要一个连接远程会话的本地瘦客户端 (包括本地剪贴板图像粘贴桥接) 时,用 `herdr --remote <host>`。
+本地工作先用 `herdr`,再在窗格中运行 `ssh you@server`,可让同一个本地工作区独占展示远程 shell。需要显式命名的远程 Herdr 会话时,用 `herdr agent start --ssh ... --ssh-session NAME`。想要可分离、类似 tmux 的持久远程会话,或使用手机 SSH 客户端时,从 Herdr 外部普通 SSH 后再运行 `herdr`。想要本地瘦客户端展示完整远程 Herdr UI、自动引导远程二进制并桥接本地图像剪贴板时,用 `herdr --remote <host>`。
 
 关于远程引导细节、命名远程会话、自定义二进制、直接终端附加和 `--no-session`,参见[持久化与远程访问](/zh-cn/docs/persistence-remote/)。

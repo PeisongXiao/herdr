@@ -93,6 +93,149 @@ HERDR_REMOTE_BINARY=target/release/herdr herdr --remote workbox
 herdr --remote workbox --session agents
 ```
 
+## Herdr の中から SSH する
+
+Unix で最も直接的な経路はローカル Herdr セッションから始めます:
+
+```bash
+herdr
+# Herdr ペイン内で実行
+ssh workbox
+```
+
+通常の foreground 認証は OpenSSH が行います。その後 Herdr はリモート daemon を検出または起動し、必要な protocol/capability を確認し、2 台の server を接続して、`ssh` を実行したペインに新しい remote shell を presentation します。managed shell は remote Herdr session `default` に明示的に属し、2 つ目の TUI や remote socket の選択は不要です。
+
+この workflow は pane を mirror せず delegate します。process と PTY は remote host に残りますが、pane は一度に 1 台の machine の workspace だけに存在します。local Herdr が presentation している間、remote daemon は自身の workspace list からその pane を除きます。切断時にこの経路が意図的に destructive である理由と `remote-handoff` で残す方法は、下の[pane ownership と lifecycle](#pane-ownership-と-lifecycle)を参照してください。
+
+## SSH agent session
+
+local agent を起動する感覚で、実際の process は remote Herdr server 内で動かしたい場合:
+
+```bash
+herdr agent start reviewer --ssh workbox --agent opencode --cwd /repo -- opencode
+```
+
+direct federation は現在 Unix-only です。local server は OpenSSH で認証し、必要なら remote server を起動し、protocol、peer federation、remote presentation を確認して、任意の official integration を準備し、remote agent を起動して local workspace へ pane を delegate します。CLI は managed SSH 前に対話 session の意味を変える effective SSH config を拒否し、server は SSH-backed agent/API request に同じ境界を強制します。
+
+delegated pane と peer bridge は runtime-only で、detach 可能な remote session ではありません。local owner pane の close、local Herdr server の stop、SSH transport の喪失は remote pane と agent を終了します。remote host で継続させるには切断前に presentation pane 内で `herdr remote-handoff` を実行してください。これは update や `herdr --remote` の server replacement `--handoff` とは別です。
+
+integration は `--agent AGENT` から選び、省略時は argv の先頭 command を認識します。hook が別管理または対応 agent でない場合は `--no-remote-integration` を使います。`--ssh` は任意 SSH option ではなく target を受けるため、port、identity、jump host は `~/.ssh/config` に置きます。named remote session は次のように指定します:
+
+```bash
+herdr agent start reviewer --ssh workbox --ssh-session agents --agent opencode --cwd /repo -- opencode
+```
+
+direct SSH federation の session selection は明示的です。`agent start --ssh workbox` と pane の `ssh workbox` は remote `default` を明示的に渡すため、継承または SSH で受理された `HERDR_SESSION`、`HERDR_SOCKET_PATH`、`HERDR_CLIENT_SOCKET_PATH` は setup/API/final attach を redirect できません。named session は `--ssh-session NAME` が必要で、plain pane SSH が local state/env/SSH config から選ぶことはありません。
+
+`herdr --remote` と異なり、direct federation は remote Herdr を copy/download/install/replace しません。検出順は次のとおりです:
+
+1. remote `PATH` 上の `herdr`
+2. `~/.local/bin/herdr`
+3. 一般的な system、Homebrew/Linuxbrew、mise、Nix profile location
+
+そのため `~/.local/bin` が noninteractive SSH の `PATH` になくても `install-local.sh` の default destination を検出できます。binary がなければ明示的な install warning、protocol や capability が異なれば両 machine の update を求める compatibility warning になります。explicit agent/API request は unmanaged SSH shell に暗黙 fallback せず失敗します。pane shim は理由を表示して private connection を cleanup し、元の raw argv で実際の SSH を実行します。
+
+双方向 awareness には account 用 remote Unix-domain socket forwarding の許可も必要です。制限時は SSH daemon policy、account rule、`authorized_keys` の key option を確認してください。拒否時、Herdr は remote Unix-socket forwarding と具体的 policy を示す `remote peer bridge failed` を保持します。explicit agent/API start は停止し、pane shim は同じ診断後に raw SSH へ fallback します。
+
+peer 登録後、initiator は remote agent を操作でき、remote 側は origin agent の metadata-only awareness を得ます:
+
+```bash
+herdr agent list
+herdr agent read workbox::reviewer
+herdr agent attach workbox::reviewer
+herdr peer health workbox
+```
+
+peer id は SSH target、option、remote session から作られます。named session では特に固定 id を仮定せず `herdr peer list` を使ってください。
+
+## SSH integration の詳細
+
+Unix では各 pane の `PATH` の先頭に小さな `ssh` shim が置かれ、対応する interactive SSH は unmanaged raw shell ではなく remote Herdr を使います:
+
+```bash
+ssh workbox
+ssh -p 2222 -i ~/.ssh/workbox -J bastion -A you@workbox
+```
+
+新規 macOS login-zsh pane では、default `shell_mode = "auto"` を含め、private one-shot hook が `/usr/libexec/path_helper` の後にも shim を先頭に保ちます。元の `ZDOTDIR` と startup file を復元してから、最初の prompt で shim を再 prepend し `rehash` して自身を削除します。alias/function は通常どおり優先され、`/usr/bin/ssh` などの absolute path は直接実行されます。upgrade 前から存在する pane は再作成まで変わりません。
+
+実際の OpenSSH が最初に connection を確立するため、host-key confirmation、password、key passphrase、MFA は foreground terminal に留まり、Herdr は credential を読みません。認証後 OpenSSH は private control master を background 化し、Herdr は discovery、server/capability check、reverse peer bridge、final terminal attach に再利用します。password host でも通常 prompt は一度で、managed connection は SSH keepalive も運びます。
+
+final SSH channel は remote default session から server-owned shell を claim して direct attach します。shell は SSH command の cwd/env をコピーし、Herdr routing variable を除き、`SSH_CONNECTION`、accepted locale、forwarded `SSH_AUTH_SOCK` を保ちます。remote daemon が process を所有し、initiator pane が presentation を排他的に所有します。named session の agent には `--ssh-session NAME` を使います。
+
+### Pane ownership と lifecycle
+
+managed remote pane の workspace owner は一つです。machine A が machine B の Herdr daemon 上の pane を presentation すると、B はその pane を workspace から除きます。2 つの TUI に同時表示される read-only mirror ではありません。agent state と terminal input は B 上の一つの native terminal から来ます。
+
+この ownership は通常の detach persistence ではなく lifecycle contract です。次のいずれでも B 上の delegated pane/process は終了します:
+
+- SSH attach の終了または network loss
+- A 上の owner pane の close
+- A の Herdr server の stop または lease renewal failure
+- delegation の明示的 replacement/termination
+
+activation 済み managed SSH presentation が終わると、Herdr は SSH 前の shell を復元せず former owner pane を閉じます。ownership commit 前に final attach が拒否された場合は prepared claim を破棄して local pane を保ちます。client disconnect 後も whole remote session を残すには、ordinary SSH 後に remote `herdr` を実行するか `herdr --remote` を使います。
+
+### Pane を実際の host に残す
+
+接続終了前に current delegated pane を残すには、その中で実行します:
+
+```bash
+herdr remote-handoff
+```
+
+`remote-handoff` は cursor-only で、host、pane id、target を受けません。remote daemon は delegation を除き、同じ live pane を自身の host の新 workspace に置きます。既存 workspace へ merge せず、attach 済み remote TUI の focus も変えません。managed attach は終了し old owner pane が閉じます。その pane が deeper remote presentation を所有または準備中なら intermediate handoff は拒否されるため、setup を完了/取消しして innermost pane を先に handoff します。full remote session で続けるには `herdr --remote workbox` または ordinary SSH 後の `herdr` で新 workspace を選びます。
+
+これは update live handoff と無関係です。`remote-handoff` は delegated pane 一つを host workspace に戻し、`update --handoff` / `--remote --handoff` は全 pane を保とうとしながら running server を置換します。
+
+### Nested SSH と takeover
+
+対応 SSH は delegated remote pane 内でも統合されます:
+
+```bash
+ssh workbox
+# delegated workbox pane 内
+ssh gpu-box
+```
+
+各 hop は host の Herdr daemon に接続し existing presentation owner を前へ渡します。元の visible pane が innermost shell を表示し、intermediate/destination daemon は delegated pane を local workspace から除きます。disconnect/owner stop は chain を destructive に unwind します。`gpu-box` で `remote-handoff` すると cursor 下の innermost pane だけが新しい `gpu-box` workspace になり、outer attach が unwind します。
+
+existing peer agent の attach も同じ exclusive rule です。別 machine が presentation 中なら default で拒否します。owner になる pane から実行し、以前の presentation を本当に置換するときだけ指定します:
+
+```bash
+herdr agent attach workbox::reviewer --takeover
+```
+
+以前の owner は切断され、2 つの live presentation は作りません。deeper remote presentation を所有する pane は先に deeper pane を handoff/close します。plain managed `ssh` は fresh remote shell を作るため takeover 不要です。
+
+### 対応 SSH 形式
+
+Herdr は意味を変えず destination-only interactive session と分類できるものだけを統合します。
+
+| 形式 | 挙動 |
+| --- | --- |
+| `ssh host`、`ssh user@host` | 統合 |
+| `-4`、`-6`、`-A`、`-a`、`-C`、`-F`、`-i`、`-J`、`-l`、`-p` と互換 `-o` | 統合して保持 |
+| `-t`、`-tt` と互換 TTY setting | 統合。final attach は常に TTY を要求 |
+| `ssh host command ...` または第 2 positional arg | 実際の `ssh` |
+| `-L`、`-R`、`-D`、`-W`、`-w`、`-N`、`-f`、`-s`、`-T` | 実際の `ssh` |
+| command-line `-o` または effective config による remote command、forwarding、local command、noninteractive/subsystem、background、tunnel | 実際の `ssh` |
+| unknown/ambiguous option shape | 実際の `ssh` |
+
+Herdr は `Host`、`Match`、`Include` を含む destination の effective OpenSSH config を考慮します。上記の意味があれば shim は raw argv を変更せず実際の `ssh` に渡し、統合強制のため setting を削除/上書きしません。config inspection/local API/managed setup failure も pane-only fallback です。explicit `agent start --ssh` と raw API federation は server-side enforcement を含め、managed SSH 開始前に unsafe config を拒否します。
+
+`scp` と `sftp` は intercept しません。一回だけなら `HERDR_SSH_BYPASS=1 ssh workbox`、pane shim 全体なら `[remote].ssh_integration = false` を使います。`manage_ssh_config` は `herdr --remote` だけを制御します。
+
+### Peer の境界と再接続
+
+peer link は SSH の trust direction を反転せず agent metadata を双方向に見せます。SSH initiator は remote agent の list/get/read/explain/send/rename/start/wait/attach が可能です。restricted reverse link で remote server ができるのは origin の ping と agent metadata list/get だけで、explain、detection preview、terminal read、input、rename、process launch はできません。
+
+SSH reverse forwarding は current server の opaque per-server restricted endpoint に到達します。許可されるのは `ping`、`peer.agent.list`、`peer.agent.get`、delegation id/epoch だけを持つ `peer.presentation.activate` acknowledgment です。短い opaque name は通常 full API socket の隣ですが、path limit を超える場合は temporary directory の短い endpoint を使います。restart で identity が変わるため stale forward は replacement server に接続できず、client は path を derive/cache してはいけません。terminal/detection preview/full JSON API/private binary client socket は公開しません。setup と remote status projection は full transport の publish ではなく、認証済み SSH 内で個別に `herdr api bridge` を実行します。
+
+plain pane `ssh` bridge は foreground attach の終了時に解放され、wrapper が 15 秒 server lease を 3 秒ごとに renew するため kill/crash でも expiry 後に回収されます。bridge loss は `remote-handoff` 済みでなければ delegated pane も終了します。incoming reverse registration にも 15 秒 lease があり、agent metadata refresh 成功時だけ renew されるため origin crash/network loss は ghost peer を除きます。`agent start --ssh` bridge は local owner pane と同じ lifecycle です。
+
+同じ peer への concurrent connection は独立し、一つを除いても他は終わりません。cleanup は remote registration が自身の forwarded socket を指している場合だけ unregister し、古い cleanup が replacement を消しません。socket/control cleanup は background worker で続きます。peer は runtime state で durable pairing ではなく、`peer health` で refresh、`peer unregister` で active bridge を削除し、server restart 後は再接続が必要です。active/pending presentation、peer link、pending cleanup は server live handoff を block します。removed/expired route に所有される delegated pane は invisible に残さず終了するため、残す場合は disconnect 前に handoff してください。
+
 ## ダイレクトターミナルアタッチ
 
 完全な Herdr アタッチはワークスペース UI 全体を開きます。ダイレクトアタッチは、サーバーが所有するターミナルをひとつだけ、現在のターミナルに開きます。

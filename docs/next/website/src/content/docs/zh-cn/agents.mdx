@@ -109,7 +109,7 @@ herdr agent rename w1:p1 reviewer
 herdr agent rename reviewer --clear
 ```
 
-目标可以是终端 ID、唯一的智能体名称、检测到或上报的智能体标签,以及旧式窗格 ID。
+目标可以是终端 ID、唯一的智能体名称、检测到或上报的智能体标签、`workbox::reviewer` 这样的 peer 限定目标,以及旧式窗格 ID。
 
 ## 自定义状态标签
 
@@ -140,6 +140,46 @@ herdr agent start reviewer --cwd ~/project --split right -- pi
 ```bash
 herdr agent start docs --workspace w1 --tab w1:t1 -- claude
 ```
+
+要让智能体在 SSH 主机上运行、同时保留本地 Herdr 控制,可以使用远程 Herdr 服务器:
+
+```bash
+herdr agent start reviewer --ssh workbox --agent opencode --cwd /srv/project -- opencode
+```
+
+这条 Unix-only 路径不会在普通 SSH PTY 中启动智能体。Herdr 会在远程 `PATH`、常见用户/系统、Homebrew、mise、Nix 路径以及 `~/.local/bin/herdr` 中寻找二进制,必要时启动守护进程,并验证协议、peer federation 和 remote presentation 能力;它不会安装或更新远程 Herdr。缺失或不兼容会产生明确错误。CLI 在托管 SSH 前会拒绝改变交互会话语义的有效 SSH 配置,服务器也对 SSH-backed agent/API 启动执行同样边界。
+
+默认情况下,Herdr 使用 `--agent AGENT` 指定的官方集成,或识别 `argv[0]`;已有独立 hook 管理或命令并非受支持智能体时使用 `--no-remote-integration`。随后 Herdr 在远程启动智能体,从远程工作区移除其窗格,并把它独占展示到本地窗格。这是委派而不是持久镜像: 同一时间只有一台机器拥有展示权。关闭本地所有者窗格、停止其 Herdr 服务器或丢失连接都会终止远程窗格和智能体。要让它留在远程主机,请先在展示窗格内运行 `herdr remote-handoff`。默认显式选择远程 Herdr 会话 `default`;只有 `--ssh-session NAME` 会选择命名会话,继承或 SSH 接受的 `HERDR_SESSION` 与 socket 变量不能重定向它。自定义端口、jump host 和 identity 应放在 SSH 配置中。
+
+成功启动时,Herdr 会把两台服务器注册为运行时 peer。`herdr agent list` 会包含 peer 智能体,并可用 `peer::target` 操作:
+
+```bash
+herdr agent list
+herdr agent read workbox::reviewer
+herdr agent send workbox::reviewer "continue"
+herdr agent attach workbox::reviewer
+herdr agent start docs --peer workbox --cwd /srv/project -- opencode
+```
+
+peer 权限是智能体作用域,并遵循 SSH 的信任方向。发起 SSH 的一侧可以列出、检查、读取、解释、发送、重命名、启动、等待和附加远程智能体。受限反向链接只允许远端 ping 发起端以及列出/读取智能体元数据;不能解释发起端智能体、读取终端或检测预览、注入输入、重命名或启动发起端进程。`agent focus` 不能改变另一台服务器的展示;应使用 attach。用 `herdr peer list`、`herdr peer health <peer_id>` 和 `herdr peer unregister <peer_id>` 检查或移除运行时链接。
+
+附加 peer 智能体会把它委派到执行命令的 Herdr 窗格。若另一台机器已经展示该窗格,Herdr 默认拒绝抢占;只有确认替换现有所有者时才使用:
+
+```bash
+herdr agent attach workbox::reviewer --takeover
+```
+
+takeover 会断开旧展示,绝不会创建第二份实时副本。完整双向感知要求 SSH 守护进程及 `authorized_keys` 策略允许远程 Unix-socket 转发;被拒绝时,显式 agent/API 启动会保留包含 forwarding-policy 原因的 `remote peer bridge failed` 诊断并停止,窗格 shim 会先显示同一诊断,再按原始参数运行普通 SSH。
+
+在 Herdr 窗格中,普通交互式 SSH 使用同一 peer 模型:
+
+```bash
+ssh workbox
+```
+
+OpenSSH 在前台处理主机检查、密码、口令和 MFA,Herdr 再复用已认证连接进行设置、peer 链接和最终 attach。委派 shell 明确属于远程 `default` 会话,并继承 SSH 的目录和环境,包括转发的 `SSH_AUTH_SOCK`;Herdr 路由变量不能重定向它。在其中启动的智能体是原生远程 Herdr 智能体。plain `ssh` 不选择命名 Herdr 会话,需要时应显式使用 `agent start --ssh ... --ssh-session NAME`。
+
+受支持的 SSH 可以继续嵌套;每一跳连接该主机的 Herdr 守护进程,并向前传递唯一展示所有者,中间会话不会出现重复窗格。断开或所有者停止会销毁整条委派链;`herdr remote-handoff` 只处理光标所在的最内层窗格。仅含目标地址的交互式形式以及常见端口、identity、jump host、agent forwarding、配置与兼容 `-o` 选项会集成。远程命令、非交互/无会话、转发、隧道和本地命令语义会按原始 argv 交给真实 `ssh`,包括来自 `Host`、`Match` 或 `Include` 的有效配置。设置 `[remote].ssh_integration = false`,或单次使用 `HERDR_SSH_BYPASS=1 ssh workbox`,可绕过 shim。完整边界见[持久化与远程访问](/zh-cn/docs/persistence-remote/)。
 
 普通终端、服务器、测试、shell 和底层终端输入请使用 `herdr pane ...` 命令。例如跑 `cargo test` 用 `pane split` 和 `pane run`,而不是 `agent start`,除非那个终端就是有意要当作智能体目标。
 

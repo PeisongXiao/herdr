@@ -109,7 +109,7 @@ herdr agent rename w1:p1 reviewer
 herdr agent rename reviewer --clear
 ```
 
-ターゲットにはターミナル ID、一意なエージェント名、検出または報告されたエージェントラベル、レガシーなペイン ID が使えます。
+ターゲットにはターミナル ID、一意なエージェント名、検出または報告されたエージェントラベル、`workbox::reviewer` のような peer-qualified target、レガシーなペイン ID が使えます。
 
 ## カスタムステータスラベル
 
@@ -140,6 +140,46 @@ herdr agent start reviewer --cwd ~/project --split right -- pi
 ```bash
 herdr agent start docs --workspace w1 --tab w1:t1 -- claude
 ```
+
+SSH ホスト上で agent を実行しつつローカル Herdr から制御するには、リモート Herdr サーバーを使います:
+
+```bash
+herdr agent start reviewer --ssh workbox --agent opencode --cwd /srv/project -- opencode
+```
+
+この Unix-only 経路は raw SSH PTY ではなくリモート Herdr を使います。Herdr はリモート `PATH`、一般的な user/system、Homebrew、mise、Nix の場所と `~/.local/bin/herdr` を探し、必要なら daemon を起動して protocol、peer federation、remote presentation を検証します。リモート binary の install/update は行いません。欠落や非互換は明示的なエラーになります。CLI は managed SSH 前に対話セッションの意味を変える有効 SSH config を拒否し、server も SSH-backed agent/API start に同じ境界を強制します。
+
+デフォルトでは `--agent AGENT` の公式 integration を準備し、省略時は `argv[0]` を認識します。hook を別管理している場合や対象 agent でない場合は `--no-remote-integration` を使います。その後 agent をリモートで起動し、リモート workspace からペインを除き、ローカルペインに排他的に presentation します。これは durable mirror ではなく delegation です。一度に presentation owner は 1 台だけで、local owner pane の close、owner server の stop、接続喪失は remote pane と agent を終了します。残すには `herdr remote-handoff` を presentation pane 内で実行します。default の remote Herdr session は明示的に `default` で、`--ssh-session NAME` だけが named session を選びます。継承または SSH で受理された `HERDR_SESSION` や socket 変数では変更できません。port、jump host、identity は SSH config に置きます。
+
+成功すると両 server は runtime peer として登録され、`peer::target` で remote agent を操作できます:
+
+```bash
+herdr agent list
+herdr agent read workbox::reviewer
+herdr agent send workbox::reviewer "continue"
+herdr agent attach workbox::reviewer
+herdr agent start docs --peer workbox --cwd /srv/project -- opencode
+```
+
+peer access は agent scope で SSH の信頼方向に従います。SSH initiator は remote agent の list/get/read/explain/send/rename/start/wait/attach ができます。restricted reverse link で remote 側ができるのは origin の ping と agent metadata の list/get だけです。origin terminal や detection preview の read、input、rename、process launch、explain はできません。`agent focus` は別 server の presentation を変えないため attach を使います。link の確認と削除には `herdr peer list`、`peer health <peer_id>`、`peer unregister <peer_id>` を使います。
+
+peer agent の attach はコマンドを実行した Herdr ペインへその pane を委譲します。すでに別の machine が presentation していれば暗黙には奪いません。本当に owner を置き換える場合だけ指定します:
+
+```bash
+herdr agent attach workbox::reviewer --takeover
+```
+
+takeover は以前の presentation を切断し、2 つの live copy は作りません。双方向 awareness には SSH daemon と `authorized_keys` が remote Unix-socket forwarding を許可する必要があります。拒否時、明示的 agent/API start は forwarding policy を含む `remote peer bridge failed` を保持して停止し、pane shim は同じ診断を表示してから元の argv で通常の SSH を実行します。
+
+Herdr ペイン内の通常の対話 SSH も同じ peer model を使います:
+
+```bash
+ssh workbox
+```
+
+host check、password、passphrase、MFA は OpenSSH が foreground で扱い、Herdr は認証済み connection を setup、peer link、final attach に再利用します。delegated shell は remote `default` session に属し、SSH の cwd/env と forwarded `SSH_AUTH_SOCK` を保ちます。routing 変数では redirect できません。そこで起動した agent は native remote Herdr agent です。plain `ssh` は named Herdr session を選ばないため、必要なら `agent start --ssh ... --ssh-session NAME` を使います。
+
+対応 SSH は delegated pane 内でも nested にでき、各 hop は一つの presentation owner を前へ渡します。切断や owner stop は chain を破棄し、`remote-handoff` はカーソル下の最内層だけを対象にします。destination-only interactive form と一般的な port、identity、jump host、agent forwarding、config、互換 `-o` は統合されます。remote command、noninteractive/sessionless、forwarding、tunnel、local-command の意味は、`Host`、`Match`、`Include` 由来の場合も含めて raw argv のまま実際の `ssh` へ渡されます。`[remote].ssh_integration = false` または一回限りの `HERDR_SSH_BYPASS=1 ssh workbox` で迂回できます。詳細は[永続化とリモートアクセス](/ja/docs/persistence-remote/)を参照してください。
 
 通常のターミナル、サーバー、テスト、シェル、低レベルなターミナル入力には `herdr pane ...` コマンドを使ってください。たとえば `cargo test` には `agent start` ではなく `pane split` と `pane run` を使います。そのターミナルを意図的にエージェントターゲットとして扱うのでない限り。
 

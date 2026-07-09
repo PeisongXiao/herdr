@@ -40,9 +40,10 @@ API schema 命令:
 herdr api schema
 herdr api schema --json
 herdr api schema --output herdr-api.schema.json
+herdr api bridge
 ```
 
-`herdr api schema` 会打印安装的二进制中包含的 socket 协议 schema 简短摘要。需要完整 JSON Schema 文档时使用 `--json`;要写入文件则使用 `--output PATH`。
+`herdr api schema` 会打印安装的二进制中包含的 socket 协议 schema 简短摘要。需要完整 JSON Schema 文档时使用 `--json`;要写入文件则使用 `--output PATH`。`api bridge` 从 stdin 读取首个 JSON 请求,转发到本地完整 API socket,并把响应流式写到 stdout。Herdr 通过已认证 SSH 命令用它完成 federation 设置和远程智能体状态投影;长期 peer 链接不会公开完整 API socket。
 
 ## Shell 补全
 
@@ -80,6 +81,7 @@ compinit
 
 ```bash
 herdr server
+herdr server ensure [--json]
 herdr server stop
 herdr server reload-config
 herdr server agent-manifests [--json]
@@ -87,7 +89,7 @@ herdr server update-agent-manifests [--json]
 herdr server reload-agent-manifests
 ```
 
-`herdr server` 显式运行无界面服务器,适合被监管或服务式的部署。`reload-config` 在不重启窗格的情况下应用可重载设置。`agent-manifests` 显示生效的智能体检测清单来源、缓存的远程版本和最近的远程更新结果。`update-agent-manifests` 立即拉取远程清单更新,重载到运行中的服务器,并打印更新后的清单状态;要原始状态响应就加 `--json`。`reload-agent-manifests` 在编辑本地覆盖后,把智能体检测清单重载到运行中的服务器。
+`herdr server` 显式运行无界面服务器,适合被监管或服务式的部署。`ensure` 只在服务器尚未运行时启动后台服务器。`server stop` 会在即将终止远程展示窗格时警告;需要保留时先在窗格内运行 `herdr remote-handoff`。`reload-config` 在不重启窗格的情况下应用可重载设置。`agent-manifests` 显示生效的智能体检测清单来源、缓存的远程版本和最近的远程更新结果。`update-agent-manifests` 立即拉取远程清单更新,重载到运行中的服务器,并打印更新后的清单状态;要原始状态响应就加 `--json`。`reload-agent-manifests` 在编辑本地覆盖后,把智能体检测清单重载到运行中的服务器。
 
 ## 通知
 
@@ -243,16 +245,28 @@ herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
 herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
 herdr agent attach <target> [--takeover]
-herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+herdr agent start <name> [--agent AGENT] [--peer PEER] [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] [--ssh TARGET] [--ssh-session NAME] [--no-remote-integration] -- <argv...>
 herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
+herdr ssh <ssh-args...>
+herdr remote-handoff
 ```
 
-智能体目标可以是终端 ID、唯一的智能体名称、检测到或上报的智能体标签,以及旧式窗格 ID。名称和标签是智能体的身份。终端 ID 和旧式窗格 ID 是底层的逃生舱。
+智能体目标可以是终端 ID、唯一的智能体名称、检测到或上报的智能体标签、`peer::target`,以及旧式窗格 ID。名称和标签是智能体的身份。终端 ID 和旧式窗格 ID 是底层的逃生舱。
 
 `agent read` 读取解析出的终端流。`agent send` 向该流写入字面文本。`agent get`、`agent focus`、`agent wait` 和 `agent attach` 要求解析出的终端具有智能体身份。`agent rename` 可以赋予这个身份。
 
 `agent explain` 请求运行中的服务器对屏幕检测所用的同一份底部缓冲区检测快照进行分类,因此实时输出反映服务器生效的清单缓存。因为它使用 `agent.explain` socket 方法,升级 Herdr 后,请先重启或交接到更新后的服务器,再使用实时 explain。用 `--file PATH --agent LABEL` 可以改为在本地解释一份保存的样本。默认输出显示智能体、最终状态、清单来源和版本、匹配的规则及其区域证据,以及任何回退、跳过或警告原因。加 `--verbose` 可以看到可见证据标志、缓存的远程版本、本地覆盖的遮蔽情况、远程更新状态,以及带匹配器和区域证据的完整已评估规则列表。提交问题报告或写测试时加 `--json`。
+
+`agent start --ssh TARGET` 仅支持 Unix。它在远程 `PATH` 和已知用户/系统、Homebrew、mise、Nix 路径中寻找 Herdr,必要时启动兼容守护进程,然后在远程启动智能体并把窗格委派到本地工作区;不会引导、安装或更新远程二进制。`--agent AGENT` 选择要准备的官方集成,省略时尝试识别 `argv[0]`;用 `--no-remote-integration` 跳过准备。默认显式选择远程 `default` 会话,只有 `--ssh-session NAME` 选择命名会话,继承或 SSH 接受的 Herdr 路由变量不能改变它。连接选项放进 SSH 配置;CLI 与服务器都会在托管 SSH 前拒绝改变交互语义的有效配置。
+
+委派窗格只有一个展示所有者,且在本地展示期间会从远程工作区移除。关闭所有者窗格、停止其 Herdr 服务器或丢失 SSH 会终止远程窗格与智能体;它不会恢复成 shell 或等待以后重连。需要继续时先在窗格内运行 `herdr remote-handoff`,把它放回远程主机的新工作区。
+
+SSH 启动也会注册运行时 peer。发起端可对 peer 智能体执行 `list`、`get`、`read`、`explain`、`send`、`rename`、`wait`、`attach` 和 `start`;受限反向链接只允许 `ping`、`list`、`get` 与单向 presentation-activation 确认,不能解释或读取发起端终端/检测预览、注入输入或启动进程。`agent focus` 不改变另一台服务器的焦点,应使用 `agent attach peer::target`。peer attach 必须从将成为所有者的窗格执行;已有展示时除非显式 `--takeover` 否则拒绝,takeover 只替换旧所有者。拥有更深远程展示的中间窗格必须先解开该展示。`agent start --peer PEER` 可沿 SSH 信任方向在 peer 上启动但不本地展示,且不接受 `--focus`。
+
+在 Unix Herdr 窗格内,仅含目标的交互式 `ssh TARGET` 会路由到 `herdr ssh`。常见 `-p`、`-i`、`-J`、`-F`、`-A`、`-4`/`-6` 和兼容 `-o` 选项保持不变;OpenSSH 在前台认证,Herdr 复用连接验证协议和 `peer_federation`/`remote_presentation`,注册受限 peer 桥并领取远程 `default` 会话的新 shell。远程命令、`-L`/`-R`/`-D`/`-W`、隧道、`-N`、`-f`、`-s`、`-T` 及来自有效 SSH 配置的等价语义会按原始 argv 交给真实 `ssh`。普通窗格路径的设置失败会警告后回退;显式 `agent start --ssh` 与 API 请求则失败。`scp` 和 `sftp` 不受影响。用 `[remote].ssh_integration = false` 或 `HERDR_SSH_BYPASS=1 ssh TARGET` 绕过。
+
+peer 反向桥需要 SSH daemon 与 `authorized_keys` 允许远程 Unix-socket 转发。被拒绝时会保留带策略原因的 `remote peer bridge failed`;显式启动停止,窗格 shim 则显示诊断后运行原始 SSH。托管展示激活后具有破坏性: 断开、关闭所有者窗格或停止所有者服务器都会终止远程窗格。嵌套 SSH 向前传递同一所有者。`herdr remote-handoff` 不接收参数,只能在当前委派窗格内运行,把最内层实时窗格移到真实主机的新工作区并关闭旧所有者窗格;它与服务器替换的 `--handoff` 无关。
 
 普通终端、服务器、测试、shell 或底层终端控制,请使用 `pane send-text`、`pane send-keys`、`pane run` 和 `terminal attach`。想带回车提交命令时用 `pane run`。
 
@@ -260,12 +274,26 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 
 ```bash
 herdr terminal attach <terminal_id> [--takeover]
+herdr terminal shell [--label LABEL]
+herdr terminal session control <target> [--takeover] [--cols N] [--rows N]
+herdr terminal session observe <target> [--cols N] [--rows N]
 herdr terminal title set <title>
 herdr terminal title clear
 ```
 
 从直接附加中用 `ctrl+b q` 分离。用 `ctrl+b ctrl+b` 发送字面的 `ctrl+b`。
+`terminal shell` 用调用者的当前目录和环境创建服务器所有的 shell 标签页,移除 Herdr 内部路由变量,再附加到它。托管窗格 SSH 则先准备独占 terminal delegation,并通过 `terminal attach` 原子提交。
 `terminal title clear` 恢复 Herdr 默认的外层终端窗口标题。
+
+## Peers
+
+```bash
+herdr peer list
+herdr peer health <peer_id>
+herdr peer unregister <peer_id>
+```
+
+peer 是由 Herdr 窗格内的 `ssh TARGET` 或 `agent start --ssh` 建立的运行时链接。`peer list` 显示生成的 id,`peer health` 刷新可达性,`peer unregister` 移除该 peer 的全部托管桥。普通 SSH bridge 随前台 attach 关闭,wrapper 每三秒续租一次 15 秒 lease,因此 wrapper 崩溃也会自动回收。peer 不是持久配对;服务器重启后必须重新连接。活动或准备中的展示、peer 链接或后台清理会阻止服务器 live handoff。
 
 ## 等待
 
