@@ -233,7 +233,7 @@ pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
     stop_session_with_timeout(name, STOP_WAIT_TIMEOUT)
 }
 
-pub(crate) fn stop_active_server() -> Result<(), String> {
+pub(crate) fn stop_active_server() -> Result<usize, String> {
     let socket_path = active_api_socket_path();
     let client_socket_path = crate::server::socket_paths::client_socket_path();
     stop_socket_with_timeout(
@@ -248,7 +248,7 @@ fn stop_session_with_timeout(name: Option<&str>, timeout: Duration) -> Result<Se
     let socket_path = api_socket_path_for(name);
     let client_socket_path = client_socket_path_for(name);
     let label = format!("session {}", name.unwrap_or(DEFAULT_SESSION_NAME));
-    stop_socket_with_timeout(
+    let _terminated_remote_presentations = stop_socket_with_timeout(
         socket_path.clone(),
         vec![socket_path, client_socket_path],
         timeout,
@@ -262,7 +262,7 @@ fn stop_socket_with_timeout(
     stopped_socket_paths: Vec<PathBuf>,
     timeout: Duration,
     label: &str,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let deadline = Instant::now() + timeout;
     let request = serde_json::json!({
         "id": "cli:session:stop",
@@ -276,11 +276,15 @@ fn stop_socket_with_timeout(
         )
     })?;
     let stop_response = send_stop_request(stream, &request, deadline)?;
-    if let Some(response) = stop_response {
+    if let Some(response) = stop_response.as_ref() {
         if let Some(error) = response.get("error") {
             return Err(error.to_string());
         }
     }
+    let terminated_remote_presentations = stop_response
+        .as_ref()
+        .map(terminated_remote_presentation_count)
+        .unwrap_or(0);
     if !wait_until_stopped_until(&stopped_socket_paths, deadline) {
         let reachable = reachable_socket_paths(&stopped_socket_paths);
         return Err(format!(
@@ -293,7 +297,16 @@ fn stop_socket_with_timeout(
                 .join(", ")
         ));
     }
-    Ok(())
+    Ok(terminated_remote_presentations)
+}
+
+fn terminated_remote_presentation_count(response: &serde_json::Value) -> usize {
+    response
+        .get("result")
+        .and_then(|result| result.get("terminated_remote_presentations"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(0)
 }
 
 pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
@@ -533,6 +546,20 @@ mod tests {
         assert_eq!(
             socket_timeout_from_remaining(Duration::from_millis(10)),
             Some(Duration::from_millis(10))
+        );
+    }
+
+    #[test]
+    fn stop_response_reports_terminated_remote_presentations() {
+        assert_eq!(
+            terminated_remote_presentation_count(&serde_json::json!({
+                "result": { "terminated_remote_presentations": 3 }
+            })),
+            3
+        );
+        assert_eq!(
+            terminated_remote_presentation_count(&serde_json::json!({ "result": {} })),
+            0
         );
     }
 

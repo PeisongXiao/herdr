@@ -2,11 +2,13 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 mod agents;
-mod env;
+pub(crate) mod env;
 mod integrations;
 mod layouts;
 mod panes;
+mod peers;
 pub(crate) mod plugins;
+mod remote_presentations;
 mod responses;
 mod session;
 mod tabs;
@@ -17,6 +19,7 @@ use super::{api_helpers::pane_agent_status, App, Mode, OverlayPaneState, ToastKi
 use crate::events::AppEvent;
 
 const API_NOTIFICATION_RATE_LIMIT: Duration = Duration::from_secs(1);
+const MAX_REMOTE_API_JOBS: usize = 8;
 #[cfg(windows)]
 const WINDOWS_POWERSHELL_AGENT_EXIT_RESPAWN_GRACE: Duration = Duration::from_secs(2);
 
@@ -27,6 +30,277 @@ enum RuntimeExitAction {
 }
 
 impl App {
+    pub(crate) fn should_defer_remote_api_request(
+        &self,
+        request: &crate::api::schema::Request,
+    ) -> bool {
+        matches!(
+            &request.method,
+            crate::api::schema::Method::PeerConnectSsh(_)
+                | crate::api::schema::Method::PeerHealth(_)
+                | crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                    peer: None,
+                    transport: Some(_),
+                    ..
+                })
+        ) || self.should_defer_peer_agent_request(&request.method)
+    }
+
+    pub(crate) fn handle_deferred_remote_api_request(
+        &mut self,
+        msg: crate::api::ApiRequestMessage,
+    ) {
+        let crate::api::ApiRequestMessage {
+            request,
+            respond_to,
+        } = msg;
+        match request.method {
+            crate::api::schema::Method::PeerConnectSsh(params) => {
+                self.begin_peer_connect_ssh(request.id, params, respond_to);
+            }
+            crate::api::schema::Method::AgentStart(params)
+                if params.transport.is_some() && params.peer.is_none() =>
+            {
+                self.begin_remote_agent_start(request.id, params, respond_to);
+            }
+            crate::api::schema::Method::PeerHealth(target) => {
+                self.begin_peer_health(request.id, target, respond_to);
+            }
+            method if self.should_defer_peer_agent_request(&method) => {
+                self.begin_peer_agent_request(request.id, method, respond_to);
+            }
+            _ => {
+                let _ = respond_to.send(responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "request is not a deferred remote operation",
+                ));
+            }
+        }
+    }
+
+    pub(super) fn begin_remote_agent_start(
+        &mut self,
+        id: String,
+        params: crate::api::schema::AgentStartParams,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        if let Err((code, message)) = env::normalize_launch_env(params.env.clone()) {
+            let _ = respond_to.send(responses::encode_error(id, &code, message));
+            return;
+        }
+        let initial_name = match self.validate_agent_start(&params) {
+            Ok(name) => name,
+            Err(err) => {
+                let _ = respond_to.send(responses::encode_error_body(
+                    id,
+                    self.agent_start_error_body(err),
+                ));
+                return;
+            }
+        };
+        if let Err(err) = self.resolve_agent_start_placement(&params) {
+            let _ = respond_to.send(responses::encode_error_body(
+                id,
+                self.agent_start_error_body(err),
+            ));
+            return;
+        }
+        if !self.try_begin_remote_api_job(&id, &respond_to) {
+            return;
+        }
+
+        let event_tx = self.event_tx.clone();
+        let worker_id = id.clone();
+        let worker_params = params.clone();
+        let worker_name = initial_name.clone();
+        let worker_respond_to = respond_to.clone();
+        let spawn = std::thread::Builder::new()
+            .name("herdr-remote-agent-start".into())
+            .spawn(move || {
+                let result =
+                    crate::remote_agent::start(&worker_params).map_err(|err| err.to_string());
+                let event = AppEvent::RemoteAgentStartFinished(Box::new(
+                    crate::events::RemoteAgentStartResult {
+                        id: worker_id,
+                        params: worker_params,
+                        initial_name: worker_name,
+                        result,
+                        respond_to: worker_respond_to,
+                    },
+                ));
+                if let Err(err) = event_tx.blocking_send(event) {
+                    if let AppEvent::RemoteAgentStartFinished(mut finished) = err.0 {
+                        if let Ok(remote) = &mut finished.result {
+                            remote.rollback();
+                        }
+                    }
+                }
+            });
+        if let Err(err) = spawn {
+            self.finish_remote_api_job();
+            let _ = respond_to.send(responses::encode_error(
+                id,
+                "agent_start_failed",
+                format!("could not start remote agent setup: {err}"),
+            ));
+        }
+    }
+
+    pub(super) fn handle_remote_agent_start_finished(
+        &mut self,
+        finished: crate::events::RemoteAgentStartResult,
+    ) {
+        let crate::events::RemoteAgentStartResult {
+            id,
+            params,
+            initial_name,
+            result,
+            respond_to,
+        } = finished;
+        let remote = match result {
+            Ok(remote) => remote,
+            Err(message) => {
+                let _ = respond_to.send(responses::encode_error(id, "agent_start_failed", message));
+                return;
+            }
+        };
+        let response = match self.finish_remote_agent_start(params, initial_name, remote) {
+            Ok((agent, argv)) => responses::encode_success(
+                id,
+                crate::api::schema::ResponseResult::AgentStarted { agent, argv },
+            ),
+            Err(err) => responses::encode_error_body(id, self.agent_start_error_body(err)),
+        };
+        let _ = respond_to.send(response);
+    }
+
+    pub(super) fn try_begin_remote_api_job(
+        &mut self,
+        id: &str,
+        respond_to: &std::sync::mpsc::Sender<String>,
+    ) -> bool {
+        if self.remote_api_jobs_in_flight >= MAX_REMOTE_API_JOBS {
+            let _ = respond_to.send(responses::encode_error(
+                id.to_string(),
+                "remote_operation_busy",
+                format!(
+                    "too many remote operations are already running (limit {MAX_REMOTE_API_JOBS})"
+                ),
+            ));
+            return false;
+        }
+        self.remote_api_jobs_in_flight += 1;
+        true
+    }
+
+    pub(crate) fn finish_remote_api_job(&mut self) {
+        self.remote_api_jobs_in_flight = self.remote_api_jobs_in_flight.saturating_sub(1);
+    }
+
+    pub(crate) fn begin_pending_owner_operation(
+        &mut self,
+        terminal_id: Option<&crate::terminal::TerminalId>,
+    ) {
+        if let Some(terminal_id) = terminal_id {
+            *self
+                .pending_owner_operations
+                .entry(terminal_id.clone())
+                .or_default() += 1;
+        }
+    }
+
+    pub(crate) fn finish_pending_owner_operation(
+        &mut self,
+        terminal_id: Option<&crate::terminal::TerminalId>,
+    ) {
+        let Some(terminal_id) = terminal_id else {
+            return;
+        };
+        let Some(count) = self.pending_owner_operations.get_mut(terminal_id) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.pending_owner_operations.remove(terminal_id);
+        }
+    }
+
+    pub(crate) fn handle_remote_api_event_during_shutdown(
+        &mut self,
+        event: AppEvent,
+    ) -> Option<AppEvent> {
+        match event {
+            AppEvent::PeerConnectSshFinished(result) => {
+                self.finish_remote_api_job();
+                let mut result = *result;
+                self.finish_pending_owner_operation(result.owner_terminal_id.as_ref());
+                if let Ok(connected) = &mut result.result {
+                    connected.bridge.stop(true);
+                }
+                let _ = result.respond_to.send(responses::encode_error(
+                    result.id,
+                    "server_unavailable",
+                    "server shut down while SSH peer setup was running",
+                ));
+                None
+            }
+            AppEvent::RemoteAgentStartFinished(result) => {
+                self.finish_remote_api_job();
+                let mut result = *result;
+                if let Ok(remote) = &mut result.result {
+                    remote.rollback();
+                }
+                let _ = result.respond_to.send(responses::encode_error(
+                    result.id,
+                    "server_unavailable",
+                    "server shut down while remote agent setup was running",
+                ));
+                None
+            }
+            AppEvent::PeerAgentRequestFinished(result) => {
+                self.finish_remote_api_job();
+                self.handle_peer_agent_request_finished(*result);
+                None
+            }
+            AppEvent::PeerHealthRequestFinished(result) => {
+                self.finish_remote_api_job();
+                self.handle_peer_health_finished(*result);
+                None
+            }
+            event => Some(event),
+        }
+    }
+
+    pub(crate) fn quiesce_remote_api_jobs_for_shutdown(&mut self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while self.remote_api_jobs_in_flight != 0 {
+            let mut progressed = false;
+            for _ in 0..super::APP_EVENT_DRAIN_LIMIT {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                let Ok(event) = self.event_rx.try_recv() else {
+                    break;
+                };
+                progressed = true;
+                if let Some(event) = self.handle_remote_api_event_during_shutdown(event) {
+                    self.handle_internal_event_with_prefix_sync(event);
+                }
+                if self.remote_api_jobs_in_flight == 0 {
+                    return true;
+                }
+            }
+            if !progressed {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        true
+    }
+
     pub(crate) fn dispatch_api_request(
         &mut self,
         id: &'static str,
@@ -58,6 +332,110 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
+        if let AppEvent::PeerConnectSshFinished(result) = ev {
+            self.finish_remote_api_job();
+            self.handle_peer_connect_ssh_finished(*result);
+            return;
+        }
+
+        if let AppEvent::RemoteAgentStartFinished(result) = ev {
+            self.finish_remote_api_job();
+            self.handle_remote_agent_start_finished(*result);
+            return;
+        }
+
+        if let AppEvent::PeerAgentRequestFinished(result) = ev {
+            self.finish_remote_api_job();
+            self.handle_peer_agent_request_finished(*result);
+            return;
+        }
+
+        if let AppEvent::PeerHealthRequestFinished(result) = ev {
+            self.finish_remote_api_job();
+            self.handle_peer_health_finished(*result);
+            return;
+        }
+
+        if let AppEvent::RemotePresentationActivationObserved {
+            delegation_id,
+            activated,
+        } = ev
+        {
+            self.finish_pending_owner_activation(&delegation_id, activated);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::RemoteAgentInfoMirrored {
+            pane_id,
+            remote_cwd,
+        } = ev
+        {
+            let terminal_id = self
+                .state
+                .workspaces
+                .iter()
+                .find_map(|workspace| {
+                    workspace
+                        .pane_state(pane_id)
+                        .map(|pane| pane.attached_terminal_id.clone())
+                })
+                .or_else(|| {
+                    self.remote_presentations
+                        .active
+                        .values()
+                        .find(|delegated| delegated.moved.pane_id == pane_id)
+                        .map(|delegated| delegated.moved.pane_state.attached_terminal_id.clone())
+                });
+            if let Some(terminal_id) = terminal_id.as_ref() {
+                self.renew_remote_owner_lease(terminal_id, Instant::now());
+            }
+            if let Some(crate::api::schema::AgentTransportInfo::Ssh {
+                remote_cwd: current,
+                ..
+            }) = terminal_id
+                .as_ref()
+                .and_then(|terminal_id| self.state.terminals.get_mut(terminal_id))
+                .and_then(|terminal| terminal.remote_agent_transport.as_mut())
+            {
+                if *current != remote_cwd {
+                    *current = remote_cwd;
+                    self.state.mark_session_dirty();
+                }
+            }
+            return;
+        }
+
+        if let AppEvent::PeerAgentsRefreshed {
+            peer_id,
+            generation,
+            observed_at,
+            result,
+        } = ev
+        {
+            self.apply_peer_refresh(peer_id, generation, observed_at, result);
+            return;
+        }
+
+        if let AppEvent::PaneDied { pane_id } = &ev {
+            if let Some((delegation_id, epoch)) = self
+                .remote_presentations
+                .active
+                .values()
+                .find(|delegated| delegated.moved.pane_id == *pane_id)
+                .map(|delegated| (delegated.info.delegation_id.clone(), delegated.info.epoch))
+            {
+                self.terminate_terminal_delegation(&crate::api::schema::TerminalDelegationClaim {
+                    delegation_id,
+                    epoch,
+                });
+                return;
+            }
+            if self.handle_pending_delegation_pane_exit(*pane_id) {
+                return;
+            }
+        }
+
         if let AppEvent::ClipboardWrite { content } = ev {
             #[cfg(not(test))]
             crate::selection::write_osc52_bytes(&content);
@@ -150,6 +528,7 @@ impl App {
         }
 
         if let AppEvent::PaneDied { pane_id } = &ev {
+            self.release_remote_pane_bridge(*pane_id);
             let previous_toast = self.state.toast.clone();
             if let Some(update) = self.state.publish_pane_process_exit_if_agent(*pane_id) {
                 self.sync_full_lifecycle_authority_detection_pauses();
@@ -822,10 +1201,13 @@ impl App {
 
         let response = match request.method {
             Method::ServerStop(_) => {
+                let terminated_remote_presentations = self.shutdown_remote_presentation_count();
                 self.state.should_quit = true;
                 SuccessResponse {
                     id: request.id,
-                    result: ResponseResult::Ok {},
+                    result: ResponseResult::Ok {
+                        terminated_remote_presentations: Some(terminated_remote_presentations),
+                    },
                 }
             }
             Method::ServerLiveHandoff(_) => {
@@ -936,14 +1318,55 @@ impl App {
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
-            Method::AgentList(_) => return self.handle_agent_list(request.id),
+            Method::AgentList(params) => return self.handle_agent_list(request.id, params),
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
             Method::AgentFocus(target) => return self.handle_agent_focus(request.id, target),
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
+            Method::AgentAttachPrepare(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "agent.attach.prepare is handled asynchronously",
+                );
+            }
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),
             Method::AgentExplain(target) => return self.handle_agent_explain(request.id, target),
             Method::AgentSend(params) => return self.handle_agent_send(request.id, params),
+            Method::PeerAgentList(_) => return self.handle_peer_agent_list(request.id),
+            Method::PeerAgentGet(target) => {
+                return self.handle_peer_agent_get(request.id, target);
+            }
+            Method::PeerAgentRead(params) => {
+                return self.handle_peer_agent_read(request.id, params);
+            }
+            Method::PeerAgentExplain(target) => {
+                return self.handle_peer_agent_explain(request.id, target);
+            }
+            Method::PeerAgentSend(params) => {
+                return self.handle_peer_agent_send(request.id, params);
+            }
+            Method::PeerAgentRename(params) => {
+                return self.handle_peer_agent_rename(request.id, params);
+            }
+            Method::PeerAgentStart(params) => {
+                return self.handle_peer_agent_start(request.id, params);
+            }
+            Method::TerminalDelegateCreate(params) => {
+                return self.handle_terminal_delegate_create(request.id, params);
+            }
+            Method::TerminalDelegateClaim(params) => {
+                return self.handle_terminal_delegate_claim(request.id, params);
+            }
+            Method::TerminalDelegateStatus(target) => {
+                return self.handle_terminal_delegate_status(request.id, target);
+            }
+            Method::TerminalDelegateTerminate(target) => {
+                return self.handle_terminal_delegate_terminate(request.id, target);
+            }
+            Method::TerminalDelegateHandoff(params) => {
+                return self.handle_terminal_delegate_handoff(request.id, params);
+            }
             Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
             Method::PaneMove(params) => return self.handle_pane_move(request.id, params),
@@ -990,6 +1413,24 @@ impl App {
             }
             Method::PaneClose(target) => return self.handle_pane_close(request.id, target),
             Method::PaneSendKeys(params) => return self.handle_pane_send_keys(request.id, params),
+            Method::PeerRegister(params) => return self.handle_peer_register(request.id, params),
+            Method::PeerConnectSsh(params) => {
+                return self.handle_peer_connect_ssh(request.id, params);
+            }
+            Method::PeerDisconnectSsh(params) => {
+                return self.handle_peer_disconnect_ssh(request.id, params);
+            }
+            Method::PeerKeepaliveSsh(params) => {
+                return self.handle_peer_keepalive_ssh(request.id, params);
+            }
+            Method::PeerPresentationActivate(claim) => {
+                return self.handle_peer_presentation_activate(request.id, claim);
+            }
+            Method::PeerUnregister(target) => {
+                return self.handle_peer_unregister(request.id, target);
+            }
+            Method::PeerList(_) => return self.handle_peer_list(request.id),
+            Method::PeerHealth(target) => return self.handle_peer_health(request.id, target),
             Method::IntegrationInstall(params) => {
                 return self.handle_integration_install(request.id, params);
             }
@@ -1208,6 +1649,139 @@ pub(super) mod test_support {
 mod tests {
     use super::*;
     use crate::detect::{Agent, AgentState};
+
+    fn bare_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
+    }
+
+    fn agent_start_method(
+        peer: Option<&str>,
+        transport: Option<crate::api::schema::AgentStartTransport>,
+    ) -> crate::api::schema::Method {
+        crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+            name: "worker".into(),
+            peer: peer.map(str::to_string),
+            agent: None,
+            cwd: None,
+            workspace_id: None,
+            tab_id: None,
+            split: None,
+            focus: false,
+            argv: vec!["opencode".into()],
+            env: std::collections::HashMap::new(),
+            transport,
+        })
+    }
+
+    #[test]
+    fn remote_api_requests_are_classified_for_worker_dispatch() {
+        let mut app = bare_app();
+        app.state.peers.insert(
+            "remote".into(),
+            crate::api::schema::PeerInfo {
+                id: "remote".into(),
+                label: "remote".into(),
+                status: crate::api::schema::PeerStatus::Connected,
+                transport: crate::api::schema::PeerTransportInfo::ApiSocket {
+                    api_socket: "/tmp/remote.sock".into(),
+                },
+            },
+        );
+
+        let deferred = [
+            crate::api::schema::Method::PeerConnectSsh(crate::api::schema::PeerConnectSshParams {
+                target: "remote".into(),
+                ssh_args: Vec::new(),
+                managed_control_path: None,
+                session: None,
+                label: None,
+                owner_pane_id: None,
+                owner: None,
+            }),
+            crate::api::schema::Method::PeerHealth(crate::api::schema::PeerTarget {
+                peer_id: "remote".into(),
+            }),
+            agent_start_method(
+                None,
+                Some(crate::api::schema::AgentStartTransport::Ssh {
+                    target: "remote".into(),
+                    ssh_args: Vec::new(),
+                    managed_control_path: None,
+                    session: None,
+                    prepare_integration: true,
+                }),
+            ),
+            agent_start_method(Some("remote"), None),
+            crate::api::schema::Method::AgentGet(crate::api::schema::AgentTarget {
+                target: "remote::worker".into(),
+            }),
+        ];
+
+        for method in deferred {
+            assert!(
+                app.should_defer_remote_api_request(&crate::api::schema::Request {
+                    id: "deferred".into(),
+                    method,
+                })
+            );
+        }
+
+        let local = [
+            crate::api::schema::Method::Ping(crate::api::schema::PingParams::default()),
+            agent_start_method(None, None),
+            crate::api::schema::Method::AgentGet(crate::api::schema::AgentTarget {
+                target: "missing".into(),
+            }),
+        ];
+        for method in local {
+            assert!(
+                !app.should_defer_remote_api_request(&crate::api::schema::Request {
+                    id: "local".into(),
+                    method,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn remote_api_job_limit_rejects_without_leaking_capacity() {
+        let mut app = bare_app();
+        app.remote_api_jobs_in_flight = MAX_REMOTE_API_JOBS;
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+
+        assert!(!app.try_begin_remote_api_job("busy", &response_tx));
+        assert_eq!(app.remote_api_jobs_in_flight, MAX_REMOTE_API_JOBS);
+        let response: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
+        assert_eq!(response.error.code, "remote_operation_busy");
+
+        app.remote_api_jobs_in_flight -= 1;
+        assert!(app.try_begin_remote_api_job("available", &response_tx));
+        assert_eq!(app.remote_api_jobs_in_flight, MAX_REMOTE_API_JOBS);
+        assert!(response_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn pending_owner_operations_are_reference_counted_per_terminal() {
+        let mut app = bare_app();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+
+        app.begin_pending_owner_operation(Some(&terminal_id));
+        app.begin_pending_owner_operation(Some(&terminal_id));
+        assert_eq!(app.pending_owner_operations.get(&terminal_id), Some(&2));
+
+        app.finish_pending_owner_operation(Some(&terminal_id));
+        assert_eq!(app.pending_owner_operations.get(&terminal_id), Some(&1));
+        app.finish_pending_owner_operation(Some(&terminal_id));
+        assert!(!app.pending_owner_operations.contains_key(&terminal_id));
+    }
 
     #[cfg(unix)]
     fn init_repo(path: &std::path::Path) {

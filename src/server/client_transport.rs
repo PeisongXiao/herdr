@@ -311,6 +311,7 @@ pub(crate) enum ServerEvent {
         client_id: u64,
         terminal_id: String,
         takeover: bool,
+        delegation: Option<crate::api::schema::TerminalDelegationClaim>,
     },
     /// A client requested read-only observation of one terminal.
     ClientObserveTerminal { client_id: u64, target: String },
@@ -727,6 +728,17 @@ fn client_read_loop(
                 client_id,
                 terminal_id,
                 takeover,
+                delegation: None,
+            },
+            ClientMessage::AttachDelegatedTerminal {
+                terminal_id,
+                takeover,
+                delegation,
+            } => ServerEvent::ClientAttachTerminal {
+                client_id,
+                terminal_id,
+                takeover,
+                delegation: Some(delegation),
             },
             ClientMessage::AttachScroll {
                 source,

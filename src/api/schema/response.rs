@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::agents::AgentInfo;
+use super::agents::{AgentAttachInfo, AgentInfo};
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
 use super::integrations::{
@@ -11,6 +11,7 @@ use super::panes::{
     PaneMoveResult, PaneNeighborResult, PaneProcessInfo, PaneReadResult, PaneResizeResult,
     PaneSwapResult, PaneZoomResult,
 };
+use super::peers::{AgentAttachPrepared, PeerInfo, TerminalDelegationInfo};
 use super::plugins::{
     InstalledPluginInfo, PluginActionInfo, PluginCommandLogInfo, PluginInvocationContext,
     PluginPaneInfo,
@@ -103,6 +104,23 @@ pub enum ResponseResult {
     },
     AgentList {
         agents: Vec<AgentInfo>,
+    },
+    PeerInfo {
+        peer: PeerInfo,
+    },
+    PeerSshConnected {
+        peer: PeerInfo,
+        connection_id: String,
+        attach: AgentAttachInfo,
+    },
+    PeerList {
+        peers: Vec<PeerInfo>,
+    },
+    AgentAttachPrepared {
+        prepared: AgentAttachPrepared,
+    },
+    TerminalDelegation {
+        delegation: TerminalDelegationInfo,
     },
     PaneInfo {
         pane: PaneInfo,
@@ -231,7 +249,10 @@ pub enum ResponseResult {
         status: crate::config::ConfigReloadStatus,
         diagnostics: Vec<String>,
     },
-    Ok {},
+    Ok {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminated_remote_presentations: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

@@ -5,6 +5,7 @@ pub mod common;
 pub mod events;
 pub mod integrations;
 pub mod panes;
+pub mod peers;
 pub mod plugins;
 pub mod response;
 pub mod server;
@@ -18,6 +19,7 @@ pub use common::*;
 pub use events::*;
 pub use integrations::*;
 pub use panes::*;
+pub use peers::*;
 pub use plugins::*;
 pub use response::*;
 pub use server::*;
@@ -100,7 +102,7 @@ pub enum Method {
     #[serde(rename = "tab.close")]
     TabClose(TabTarget),
     #[serde(rename = "agent.list")]
-    AgentList(EmptyParams),
+    AgentList(AgentListParams),
     #[serde(rename = "agent.get")]
     AgentGet(AgentTarget),
     #[serde(rename = "agent.read")]
@@ -115,6 +117,32 @@ pub enum Method {
     AgentFocus(AgentTarget),
     #[serde(rename = "agent.start")]
     AgentStart(AgentStartParams),
+    #[serde(rename = "agent.attach.prepare")]
+    AgentAttachPrepare(AgentAttachPrepareParams),
+    #[serde(rename = "peer.agent.list")]
+    PeerAgentList(EmptyParams),
+    #[serde(rename = "peer.agent.get")]
+    PeerAgentGet(AgentTarget),
+    #[serde(rename = "peer.agent.read")]
+    PeerAgentRead(AgentReadParams),
+    #[serde(rename = "peer.agent.explain")]
+    PeerAgentExplain(AgentTarget),
+    #[serde(rename = "peer.agent.send")]
+    PeerAgentSend(AgentSendParams),
+    #[serde(rename = "peer.agent.rename")]
+    PeerAgentRename(AgentRenameParams),
+    #[serde(rename = "peer.agent.start")]
+    PeerAgentStart(AgentStartParams),
+    #[serde(rename = "terminal.delegate.create")]
+    TerminalDelegateCreate(TerminalDelegateCreateParams),
+    #[serde(rename = "terminal.delegate.claim")]
+    TerminalDelegateClaim(TerminalDelegateClaimParams),
+    #[serde(rename = "terminal.delegate.status")]
+    TerminalDelegateStatus(TerminalDelegationTarget),
+    #[serde(rename = "terminal.delegate.terminate")]
+    TerminalDelegateTerminate(TerminalDelegationTarget),
+    #[serde(rename = "terminal.delegate.handoff")]
+    TerminalDelegateHandoff(TerminalDelegateHandoffParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]
@@ -175,6 +203,22 @@ pub enum Method {
     EventsSubscribe(EventsSubscribeParams),
     #[serde(rename = "events.wait")]
     EventsWait(EventsWaitParams),
+    #[serde(rename = "peer.register")]
+    PeerRegister(PeerRegisterParams),
+    #[serde(rename = "peer.connect_ssh")]
+    PeerConnectSsh(PeerConnectSshParams),
+    #[serde(rename = "peer.disconnect_ssh")]
+    PeerDisconnectSsh(PeerDisconnectSshParams),
+    #[serde(rename = "peer.keepalive_ssh")]
+    PeerKeepaliveSsh(PeerKeepaliveSshParams),
+    #[serde(rename = "peer.presentation.activate")]
+    PeerPresentationActivate(TerminalDelegationClaim),
+    #[serde(rename = "peer.unregister")]
+    PeerUnregister(PeerTarget),
+    #[serde(rename = "peer.list")]
+    PeerList(EmptyParams),
+    #[serde(rename = "peer.health")]
+    PeerHealth(PeerTarget),
     #[serde(rename = "pane.wait_for_output")]
     PaneWaitForOutput(PaneWaitForOutputParams),
     #[serde(rename = "integration.install")]

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -394,6 +394,19 @@ pub enum ClientMessage {
         target: String,
         /// Replace an existing writable controller for this terminal.
         takeover: bool,
+    },
+
+    /// Switch this connection into direct attach mode and commit a prepared delegation.
+    ///
+    /// This variant is appended to preserve the tags and payload shapes of every
+    /// pre-protocol-17 message (tags 0 through 9).
+    AttachDelegatedTerminal {
+        /// Terminal id to attach to.
+        terminal_id: String,
+        /// Replace an existing writable attach owner for this terminal.
+        takeover: bool,
+        /// Prepared cross-server presentation transfer to commit.
+        delegation: crate::api::schema::TerminalDelegationClaim,
     },
 }
 
@@ -972,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn client_message_wire_tags_preserve_protocol_15_order() {
+    fn client_message_wire_tags_preserve_pre_17_order() {
         fn tag(msg: &ClientMessage) -> u8 {
             *bincode::serde::encode_to_vec(msg, bincode::config::standard())
                 .unwrap()
@@ -1042,6 +1055,17 @@ mod tests {
                 takeover: false,
             }),
             9
+        );
+        assert_eq!(
+            tag(&ClientMessage::AttachDelegatedTerminal {
+                terminal_id: "term".to_owned(),
+                takeover: false,
+                delegation: crate::api::schema::TerminalDelegationClaim {
+                    delegation_id: "delegation".to_owned(),
+                    epoch: 1,
+                },
+            }),
+            10
         );
     }
 
@@ -1163,6 +1187,23 @@ mod tests {
         let msg = ClientMessage::AttachTerminal {
             terminal_id: "term_123".to_owned(),
             takeover: true,
+        };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        assert_eq!(encoded, b"\x05\x08term_123\x01");
+        let (decoded, _): (ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn client_attach_delegated_terminal_roundtrip() {
+        let msg = ClientMessage::AttachDelegatedTerminal {
+            terminal_id: "term_123".to_owned(),
+            takeover: true,
+            delegation: crate::api::schema::TerminalDelegationClaim {
+                delegation_id: "delegation-123".into(),
+                epoch: 4,
+            },
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ClientMessage, _) =

@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,10 +15,14 @@ use crate::api::schema::{
 };
 use crate::api::subscriptions::ActiveSubscription;
 use crate::api::wait::{wait_for_event, wait_for_output};
-use crate::api::{request_changes_ui, socket_path, ApiRequestMessage, ApiRequestSender, EventHub};
+use crate::api::{
+    peer_socket_path, request_changes_ui, socket_path, ApiRequestMessage, ApiRequestSender,
+    EventHub,
+};
 use crate::ipc::{
     bind_local_listener, is_connection_closed_error, local_stream_peer_closed,
-    remove_socket_file_if_owned, socket_file_identity, LocalStream, SocketFileIdentity,
+    remove_socket_file_if_owned, socket_file_identity, LocalListener, LocalStream,
+    SocketFileIdentity,
 };
 
 const SOCKET_PERMISSION_MODE: u32 = 0o600;
@@ -27,11 +31,61 @@ pub(super) const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_INITIAL_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_PEER_CONNECTIONS: usize = 32;
 
-pub struct ServerHandle {
-    _thread: std::thread::JoinHandle<()>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListenerAccess {
+    Normal,
+    Peer,
+}
+
+impl ListenerAccess {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "api",
+            Self::Peer => "peer api",
+        }
+    }
+
+    fn allows(self, method: &Method) -> bool {
+        match self {
+            Self::Normal => true,
+            Self::Peer => matches!(
+                method,
+                Method::Ping(_)
+                    | Method::PeerAgentList(_)
+                    | Method::PeerAgentGet(_)
+                    | Method::PeerPresentationActivate(_)
+            ),
+        }
+    }
+}
+
+struct PreparedListener {
+    listener: LocalListener,
     path: PathBuf,
     identity: SocketFileIdentity,
+    access: ListenerAccess,
+}
+
+struct OwnedSocket {
+    path: PathBuf,
+    identity: SocketFileIdentity,
+}
+
+struct PeerConnectionPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for PeerConnectionPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+pub struct ServerHandle {
+    _threads: Vec<std::thread::JoinHandle<()>>,
+    sockets: Vec<OwnedSocket>,
     running: Arc<AtomicBool>,
 }
 
@@ -39,17 +93,28 @@ impl Drop for ServerHandle {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
 
-        if let Err(err) = self.remove_socket_file_if_owned() {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                warn!(path = %self.path.display(), err = %err, "failed to remove api socket on shutdown");
+        for socket in &self.sockets {
+            if let Err(err) = remove_socket_file_if_owned(&socket.path, &socket.identity) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    warn!(path = %socket.path.display(), err = %err, "failed to remove api socket on shutdown");
+                }
             }
         }
     }
 }
 
 impl ServerHandle {
+    #[cfg(unix)]
     pub(crate) fn remove_socket_file_if_owned(&self) -> std::io::Result<()> {
-        remove_socket_file_if_owned(&self.path, &self.identity)
+        let mut first_error = None;
+        for socket in &self.sockets {
+            if let Err(err) = remove_socket_file_if_owned(&socket.path, &socket.identity) {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -63,6 +128,8 @@ pub fn start_server(
         Some(ServerCapabilities {
             live_handoff: crate::platform::capabilities().live_handoff,
             detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
+            peer_federation: cfg!(unix),
+            remote_presentation: cfg!(unix),
         }),
     )
 }
@@ -72,51 +139,148 @@ pub fn start_server_with_capabilities(
     event_hub: EventHub,
     capabilities: Option<ServerCapabilities>,
 ) -> std::io::Result<ServerHandle> {
-    let path = socket_path();
+    let normal = prepare_listener(socket_path(), ListenerAccess::Normal)?;
+    let peer = match prepare_listener(peer_socket_path(), ListenerAccess::Peer) {
+        Ok(peer) => peer,
+        Err(err) => {
+            let normal_path = normal.path.clone();
+            let normal_identity = normal.identity.clone();
+            drop(normal);
+            let _ = remove_socket_file_if_owned(&normal_path, &normal_identity);
+            return Err(err);
+        }
+    };
+
+    let running = Arc::new(AtomicBool::new(true));
+    let normal_socket = OwnedSocket {
+        path: normal.path.clone(),
+        identity: normal.identity.clone(),
+    };
+    let peer_socket = OwnedSocket {
+        path: peer.path.clone(),
+        identity: peer.identity.clone(),
+    };
+    let normal_thread = spawn_listener(
+        normal,
+        api_tx.clone(),
+        event_hub.clone(),
+        capabilities.clone(),
+        Arc::clone(&running),
+    );
+    let peer_thread = spawn_listener(peer, api_tx, event_hub, capabilities, Arc::clone(&running));
+
+    Ok(ServerHandle {
+        _threads: vec![normal_thread, peer_thread],
+        sockets: vec![normal_socket, peer_socket],
+        running,
+    })
+}
+
+fn prepare_listener(path: PathBuf, access: ListenerAccess) -> std::io::Result<PreparedListener> {
     prepare_socket_path(&path)?;
 
     let listener = bind_local_listener(&path)?;
-    restrict_socket_permissions(&path)?;
-    let identity = socket_file_identity(&path)?;
-    info!(path = %path.display(), "api server listening");
+    if let Err(err) = restrict_socket_permissions(&path) {
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        return Err(err);
+    }
+    let identity = match socket_file_identity(&path) {
+        Ok(identity) => identity,
+        Err(err) => {
+            drop(listener);
+            let _ = std::fs::remove_file(&path);
+            return Err(err);
+        }
+    };
+    info!(path = %path.display(), listener = access.label(), "api server listening");
 
-    let running = Arc::new(AtomicBool::new(true));
+    Ok(PreparedListener {
+        listener,
+        path,
+        identity,
+        access,
+    })
+}
+
+fn spawn_listener(
+    prepared: PreparedListener,
+    api_tx: ApiRequestSender,
+    event_hub: EventHub,
+    capabilities: Option<ServerCapabilities>,
+    running: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    let PreparedListener {
+        listener, access, ..
+    } = prepared;
     let listener_running = Arc::clone(&running);
-    let thread = std::thread::spawn(move || {
+    let active_peer_connections = Arc::new(AtomicUsize::new(0));
+    std::thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
+                    let peer_permit = if access == ListenerAccess::Peer {
+                        let Some(permit) = try_acquire_peer_connection(&active_peer_connections)
+                        else {
+                            warn!(
+                                limit = MAX_PEER_CONNECTIONS,
+                                "peer api connection limit reached"
+                            );
+                            drop(stream);
+                            continue;
+                        };
+                        Some(permit)
+                    } else {
+                        None
+                    };
                     let api_tx = api_tx.clone();
                     let event_hub = event_hub.clone();
                     let capabilities = capabilities.clone();
                     let connection_running = Arc::clone(&listener_running);
                     std::thread::spawn(move || {
+                        let _peer_permit = peer_permit;
                         if let Err(err) = handle_connection(
                             stream,
                             &api_tx,
                             &event_hub,
                             &connection_running,
                             capabilities,
+                            access,
                         ) {
-                            warn!(err = %err, "api connection failed");
+                            warn!(err = %err, listener = access.label(), "api connection failed");
                         }
                     });
                 }
                 Err(err) => {
-                    error!(err = %err, "api listener accept failed");
+                    error!(err = %err, listener = access.label(), "api listener accept failed");
                     break;
                 }
             }
         }
-        debug!("api server thread exiting");
-    });
-
-    Ok(ServerHandle {
-        _thread: thread,
-        path,
-        identity,
-        running,
+        debug!(listener = access.label(), "api server thread exiting");
     })
+}
+
+fn try_acquire_peer_connection(active: &Arc<AtomicUsize>) -> Option<PeerConnectionPermit> {
+    let mut current = active.load(Ordering::Relaxed);
+    loop {
+        if current >= MAX_PEER_CONNECTIONS {
+            return None;
+        }
+        match active.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                return Some(PeerConnectionPermit {
+                    active: Arc::clone(active),
+                });
+            }
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
@@ -138,6 +302,7 @@ fn handle_connection(
     event_hub: &EventHub,
     running: &Arc<AtomicBool>,
     capabilities: Option<ServerCapabilities>,
+    access: ListenerAccess,
 ) -> std::io::Result<()> {
     if let Err(err) = stream.set_send_timeout(Some(STREAM_WRITE_TIMEOUT)) {
         debug!(err = %err, "api connection write timeout unavailable");
@@ -173,6 +338,25 @@ fn handle_connection(
     let method = api_method_name(&request.method);
     let changes_ui = request_changes_ui(&request);
     crate::logging::api_request_started(&request_id, method, changes_ui);
+
+    if !access.allows(&request.method) {
+        let response = error_response_json(
+            request_id.clone(),
+            "method_not_allowed",
+            format!("method {method} is not available on the peer API socket"),
+        );
+        let result = write_text_line_allow_disconnect(&mut stream, &response);
+        match &result {
+            Ok(()) => crate::logging::api_request_completed(
+                &request_id,
+                method,
+                api_response_outcome(&response),
+                changes_ui,
+            ),
+            Err(err) => crate::logging::api_request_failed(&request_id, method, &err.to_string()),
+        }
+        return result;
+    }
 
     match request.method {
         Method::EventsSubscribe(params) => {
@@ -341,6 +525,27 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::AgentRename(_) => "agent.rename",
         Method::AgentFocus(_) => "agent.focus",
         Method::AgentStart(_) => "agent.start",
+        Method::AgentAttachPrepare(_) => "agent.attach.prepare",
+        Method::PeerAgentList(_) => "peer.agent.list",
+        Method::PeerAgentGet(_) => "peer.agent.get",
+        Method::PeerAgentRead(_) => "peer.agent.read",
+        Method::PeerAgentExplain(_) => "peer.agent.explain",
+        Method::PeerAgentSend(_) => "peer.agent.send",
+        Method::PeerAgentRename(_) => "peer.agent.rename",
+        Method::PeerAgentStart(_) => "peer.agent.start",
+        Method::TerminalDelegateCreate(_) => "terminal.delegate.create",
+        Method::TerminalDelegateClaim(_) => "terminal.delegate.claim",
+        Method::TerminalDelegateStatus(_) => "terminal.delegate.status",
+        Method::TerminalDelegateTerminate(_) => "terminal.delegate.terminate",
+        Method::TerminalDelegateHandoff(_) => "terminal.delegate.handoff",
+        Method::PeerRegister(_) => "peer.register",
+        Method::PeerConnectSsh(_) => "peer.connect_ssh",
+        Method::PeerDisconnectSsh(_) => "peer.disconnect_ssh",
+        Method::PeerKeepaliveSsh(_) => "peer.keepalive_ssh",
+        Method::PeerPresentationActivate(_) => "peer.presentation.activate",
+        Method::PeerUnregister(_) => "peer.unregister",
+        Method::PeerList(_) => "peer.list",
+        Method::PeerHealth(_) => "peer.health",
         Method::PaneSplit(_) => "pane.split",
         Method::PaneSwap(_) => "pane.swap",
         Method::PaneMove(_) => "pane.move",
@@ -713,6 +918,81 @@ mod tests {
         (api_tx, responder)
     }
 
+    fn write_request(stream: &mut LocalStream, request: &Request) {
+        let request = serde_json::to_string(request).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+    }
+
+    fn assert_peer_method_dispatched(request: Request) {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server, path) = local_stream_pair(&request.id);
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::default();
+        let expected_request = request.clone();
+        let response_id = request.id.clone();
+        let server_thread = std::thread::spawn(move || {
+            handle_connection(
+                server,
+                &api_tx,
+                &event_hub,
+                &server_running,
+                None,
+                ListenerAccess::Peer,
+            )
+        });
+
+        write_request(&mut client, &request);
+        let msg = api_rx.blocking_recv().unwrap();
+        assert_eq!(msg.request, expected_request);
+        msg.respond_to
+            .send(
+                serde_json::to_string(&SuccessResponse {
+                    id: response_id.clone(),
+                    result: ResponseResult::Ok {
+                        terminated_remote_presentations: None,
+                    },
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let response: SuccessResponse = serde_json::from_str(&read_line(&mut client)).unwrap();
+
+        assert_eq!(response.id, response_id);
+        assert!(server_thread.join().unwrap().is_ok());
+        let _ = fs::remove_file(path);
+    }
+
+    fn assert_peer_method_not_allowed(request: Request) {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server, path) = local_stream_pair(&request.id);
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::default();
+        let response_id = request.id.clone();
+        let server_thread = std::thread::spawn(move || {
+            handle_connection(
+                server,
+                &api_tx,
+                &event_hub,
+                &server_running,
+                None,
+                ListenerAccess::Peer,
+            )
+        });
+
+        write_request(&mut client, &request);
+        let response: ErrorResponse = serde_json::from_str(&read_line(&mut client)).unwrap();
+
+        assert_eq!(response.id, response_id);
+        assert_eq!(response.error.code, "method_not_allowed");
+        assert!(api_rx.try_recv().is_err());
+        assert!(server_thread.join().unwrap().is_ok());
+        let _ = fs::remove_file(path);
+    }
+
     #[test]
     fn socket_path_prefers_explicit_env_override() {
         let _guard = env_lock().lock().unwrap();
@@ -806,12 +1086,96 @@ mod tests {
             Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                peer_federation: cfg!(unix),
+                remote_presentation: cfg!(unix),
             }),
         );
 
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed.id, "req_1");
-        assert!(matches!(parsed.result, ResponseResult::Pong { .. }));
+        assert!(matches!(
+            parsed.result,
+            ResponseResult::Pong {
+                capabilities: Some(ServerCapabilities {
+                    peer_federation: cfg!(unix),
+                    ..
+                }),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn peer_listener_accepts_ping() {
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        let (mut client, server, path) = local_stream_pair("peer-api-ping");
+        let running = Arc::new(AtomicBool::new(true));
+        let server_running = Arc::clone(&running);
+        let event_hub = EventHub::default();
+        let server_thread = std::thread::spawn(move || {
+            handle_connection(
+                server,
+                &api_tx,
+                &event_hub,
+                &server_running,
+                None,
+                ListenerAccess::Peer,
+            )
+        });
+
+        write_request(
+            &mut client,
+            &Request {
+                id: "peer_ping".into(),
+                method: Method::Ping(crate::api::schema::PingParams::default()),
+            },
+        );
+        let response: SuccessResponse = serde_json::from_str(&read_line(&mut client)).unwrap();
+
+        assert_eq!(response.id, "peer_ping");
+        assert!(matches!(response.result, ResponseResult::Pong { .. }));
+        assert!(api_rx.try_recv().is_err());
+        assert!(server_thread.join().unwrap().is_ok());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn peer_listener_dispatches_metadata_and_presentation_acknowledgement_methods() {
+        for request in [
+            r#"{"id":"peer_list","method":"peer.agent.list","params":{}}"#,
+            r#"{"id":"peer_get","method":"peer.agent.get","params":{"target":"agent"}}"#,
+            r#"{"id":"peer_activate","method":"peer.presentation.activate","params":{"delegation_id":"delegation","epoch":1}}"#,
+        ] {
+            assert_peer_method_dispatched(serde_json::from_str(request).unwrap());
+        }
+    }
+
+    #[test]
+    fn peer_listener_rejects_methods_outside_metadata_allowlist() {
+        for request in [
+            r#"{"id":"peer_read","method":"peer.agent.read","params":{"target":"agent","source":"detection"}}"#,
+            r#"{"id":"peer_explain","method":"peer.agent.explain","params":{"target":"agent"}}"#,
+            r#"{"id":"peer_send","method":"peer.agent.send","params":{"target":"agent","text":"hello"}}"#,
+            r#"{"id":"peer_rename","method":"peer.agent.rename","params":{"target":"agent","name":"renamed"}}"#,
+            r#"{"id":"peer_start","method":"peer.agent.start","params":{"name":"shell","argv":["sh"]}}"#,
+            r#"{"id":"peer_disconnect","method":"peer.disconnect_ssh","params":{"peer_id":"peer","connection_id":"connection"}}"#,
+            r#"{"id":"peer_keepalive","method":"peer.keepalive_ssh","params":{"peer_id":"peer","connection_id":"connection"}}"#,
+            r#"{"id":"workspace_list","method":"workspace.list","params":{}}"#,
+        ] {
+            assert_peer_method_not_allowed(serde_json::from_str(request).unwrap());
+        }
+    }
+
+    #[test]
+    fn peer_connection_limit_releases_capacity_when_a_connection_closes() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut permits = (0..MAX_PEER_CONNECTIONS)
+            .map(|_| try_acquire_peer_connection(&active).unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(try_acquire_peer_connection(&active).is_none());
+        permits.pop();
+        assert!(try_acquire_peer_connection(&active).is_some());
     }
 
     #[test]
@@ -831,7 +1195,9 @@ mod tests {
             .send(
                 serde_json::to_string(&SuccessResponse {
                     id: "req_2".into(),
-                    result: ResponseResult::Ok {},
+                    result: ResponseResult::Ok {
+                        terminated_remote_presentations: None,
+                    },
                 })
                 .unwrap(),
             )
@@ -856,7 +1222,15 @@ mod tests {
 
         let running = Arc::new(AtomicBool::new(true));
         let event_hub = EventHub::default();
-        handle_connection(server, &api_tx, &event_hub, &running, None).unwrap();
+        handle_connection(
+            server,
+            &api_tx,
+            &event_hub,
+            &running,
+            None,
+            ListenerAccess::Normal,
+        )
+        .unwrap();
 
         let response: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
         assert_eq!(response["id"], "wait_1");
@@ -883,7 +1257,15 @@ mod tests {
 
         let running = Arc::new(AtomicBool::new(true));
         let event_hub = EventHub::default();
-        handle_connection(server, &api_tx, &event_hub, &running, None).unwrap();
+        handle_connection(
+            server,
+            &api_tx,
+            &event_hub,
+            &running,
+            None,
+            ListenerAccess::Normal,
+        )
+        .unwrap();
 
         let response: serde_json::Value = serde_json::from_str(&read_line(&mut client)).unwrap();
         assert_eq!(response["id"], "wait_2");
@@ -943,7 +1325,14 @@ mod tests {
         let event_hub = EventHub::default();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let server_thread = std::thread::spawn(move || {
-            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            let result = handle_connection(
+                server,
+                &api_tx,
+                &event_hub,
+                &server_running,
+                None,
+                ListenerAccess::Normal,
+            );
             done_tx.send(result).unwrap();
         });
 
@@ -975,7 +1364,14 @@ mod tests {
         let event_hub = EventHub::default();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let server_thread = std::thread::spawn(move || {
-            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            let result = handle_connection(
+                server,
+                &api_tx,
+                &event_hub,
+                &server_running,
+                None,
+                ListenerAccess::Normal,
+            );
             done_tx.send(result).unwrap();
         });
 
@@ -1007,7 +1403,14 @@ mod tests {
         let event_hub = EventHub::default();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let server_thread = std::thread::spawn(move || {
-            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            let result = handle_connection(
+                server,
+                &api_tx,
+                &event_hub,
+                &server_running,
+                None,
+                ListenerAccess::Normal,
+            );
             done_tx.send(result).unwrap();
         });
 

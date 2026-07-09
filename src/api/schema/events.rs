@@ -181,6 +181,10 @@ pub enum EventMatch {
         pane_id: String,
         agent_status: AgentStatus,
     },
+    PaneAgentStatusChangedAny {
+        pane_id: String,
+        agent_statuses: Vec<AgentStatus>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

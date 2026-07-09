@@ -611,7 +611,7 @@ fn client_handshake_succeeds() {
 }
 
 #[test]
-fn client_handshake_rejects_incompatible_version() {
+fn client_handshake_rejects_protocol_16_before_session_traffic() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -623,10 +623,13 @@ fn client_handshake_rejects_incompatible_version() {
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
 
-    // Connect to the client socket and send Hello with version 0 (pre-persistence).
+    // Protocol 16 must be rejected by the Hello/Welcome negotiation itself,
+    // before the server attempts to decode any session traffic.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
 
-    let (version, error) = client_handshake(&mut stream, 0, 80, 24)
+    let protocol_16 = CURRENT_PROTOCOL.checked_sub(1).expect("previous protocol");
+    assert_eq!(protocol_16, 16, "this regression test targets protocol 16");
+    let (version, error) = client_handshake(&mut stream, protocol_16, 80, 24)
         .expect("should read Welcome response even on rejection");
 
     assert_eq!(
@@ -635,7 +638,7 @@ fn client_handshake_rejects_incompatible_version() {
     );
     assert!(
         error.is_some(),
-        "version 0 should be rejected with an error"
+        "protocol 16 should be rejected with an error"
     );
 
     cleanup_spawned_herdr(spawned, base);

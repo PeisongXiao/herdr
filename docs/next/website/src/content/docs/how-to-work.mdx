@@ -31,7 +31,23 @@ If you want to end the session and stop its panes, stop the server:
 herdr server stop
 ```
 
-## Remote work through normal SSH
+## SSH from inside Herdr
+
+On Linux and macOS, the shortest path from local work to remote work is:
+
+```bash
+herdr
+# run this inside a Herdr pane
+ssh you@server
+```
+
+OpenSSH handles host keys, passwords, passphrases, and MFA normally. After authentication, Herdr automatically finds or starts the remote Herdr daemon, connects the two servers, and turns the current pane into a shell backed by the remote default Herdr session. You do not start a second TUI or manage a socket.
+
+The remote machine must already have a compatible Herdr that advertises peer federation and exclusive remote-pane presentation. Herdr does not install or upgrade it on this path. If the binary is missing, the protocol or capabilities are incompatible, forwarding is blocked, or managed setup otherwise fails, Herdr prints a warning and reruns the original command as ordinary SSH.
+
+Managed SSH moves pane presentation rather than making a second copy. The pane appears in a workspace on exactly one machine, and the owner is responsible for its lifetime. Closing the owner pane, stopping its Herdr server, or losing the SSH connection destroys the delegated remote pane and its process. Run `herdr remote-handoff` from inside that remote pane to move the pane under your cursor into a new workspace on its host before the connection closes. See [Persistence and remote access](/docs/persistence-remote/) for nested SSH and explicit takeover behavior.
+
+## Run Herdr after normal SSH
 
 SSH to the machine that has the code and credentials, then run Herdr there:
 
@@ -40,7 +56,7 @@ ssh you@server
 herdr
 ```
 
-This works like a terminal multiplexer. Your shell is remote. The Herdr server is remote. The agents and panes run on the remote machine. Detach with `ctrl+b q`, disconnect, then SSH back and run `herdr` again.
+This works like a terminal multiplexer. Your shell is remote. The Herdr server is remote. The agents and panes run on the remote machine. Detach with `ctrl+b q`, disconnect, then SSH back and run `herdr` again. Start the SSH command outside Herdr, or use `HERDR_SSH_BYPASS=1 ssh you@server` from a Herdr pane, when you specifically want this unmanaged path.
 
 Use this path when you already live inside an SSH shell, when you are on a phone or tablet SSH client, or when you want the simplest possible setup.
 
@@ -98,6 +114,6 @@ herdr --remote workbox
 
 ## Which path to use
 
-Use `herdr` for local work. Use `ssh you@server` then `herdr` when you want Herdr to behave like tmux on that remote shell or when you are using a phone SSH client. Use `herdr --remote <host>` when you want a local thin client for a remote session, including local clipboard image paste bridging.
+Use `herdr`, then `ssh you@server` inside a pane, for the direct Unix workflow where one local workspace presents an exclusively owned remote shell. Use `herdr agent start --ssh ... --ssh-session NAME` when an explicit remote agent should use a named session. Use ordinary SSH from outside Herdr, then run `herdr`, when you want durable tmux-style remote work or when you are using a phone SSH client. Use `herdr --remote <host>` when you want the complete remote Herdr UI as a local thin client, automatic remote bootstrap, and local clipboard image paste bridging.
 
 For remote bootstrap details, named remote sessions, custom binaries, direct terminal attach, and `--no-session`, see [Persistence and remote access](/docs/persistence-remote/).

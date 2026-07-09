@@ -185,7 +185,12 @@ impl App {
             },
         });
 
-        encode_success(id, ResponseResult::Ok {})
+        encode_success(
+            id,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            },
+        )
     }
 
     fn workspace_list_info(&self) -> Vec<crate::api::schema::WorkspaceInfo> {

@@ -38,6 +38,8 @@ pub(crate) struct HandoffManifest {
     pub expected_version: Option<String>,
     pub expected_protocol: Option<u32>,
     pub snapshot: crate::persist::SessionSnapshot,
+    #[serde(default)]
+    pub public_pane_id_aliases: std::collections::HashMap<String, u32>,
     pub panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
 }
 
@@ -301,6 +303,7 @@ pub(crate) fn report_owned(stream: &mut UnixStream) -> io::Result<()> {
 #[cfg(unix)]
 pub(crate) fn manifest_for(
     snapshot: crate::persist::SessionSnapshot,
+    public_pane_id_aliases: std::collections::HashMap<String, u32>,
     panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
     expected_protocol: Option<u32>,
     expected_version: Option<String>,
@@ -312,6 +315,7 @@ pub(crate) fn manifest_for(
         expected_version,
         expected_protocol,
         snapshot,
+        public_pane_id_aliases,
         panes,
     }
 }

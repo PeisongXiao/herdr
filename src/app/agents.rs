@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use super::{terminal_targets::TerminalTargetError, App, Mode};
-use crate::api::schema::{AgentStartParams, SplitDirection};
+use crate::api::schema::{AgentStartParams, AgentTransportInfo, SplitDirection};
 
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
@@ -18,32 +18,6 @@ impl App {
                 })
             })
             .collect()
-    }
-
-    pub(super) fn agent_info_for_target(
-        &self,
-        target: &str,
-    ) -> Result<crate::api::schema::AgentInfo, TerminalTargetError> {
-        let resolved = self.resolve_terminal_target(target)?;
-        self.agent_info(resolved.ws_idx, resolved.pane_id)
-            .ok_or_else(|| TerminalTargetError::NotFound {
-                target: target.to_string(),
-            })
-    }
-
-    pub(super) fn focus_agent_target(
-        &mut self,
-        target: &str,
-    ) -> Result<crate::api::schema::AgentInfo, TerminalTargetError> {
-        let resolved = self.resolve_terminal_target(target)?;
-        self.state
-            .focus_pane_in_workspace(resolved.ws_idx, resolved.pane_id);
-        self.state.mark_active_tab_seen();
-        self.state.settle_terminal_mode_after_focus();
-        self.agent_info(resolved.ws_idx, resolved.pane_id)
-            .ok_or_else(|| TerminalTargetError::NotFound {
-                target: target.to_string(),
-            })
     }
 
     pub(super) fn rename_agent_target(
@@ -100,19 +74,9 @@ impl App {
         params: AgentStartParams,
         extra_env: Vec<(String, String)>,
     ) -> Result<(crate::api::schema::AgentInfo, Vec<String>), AgentStartError> {
-        let name = params.name.trim().to_string();
-        if name.is_empty() {
-            return Err(AgentStartError::InvalidName);
-        }
-        if params.argv.is_empty() {
-            return Err(AgentStartError::EmptyArgv);
-        }
-        let conflicts = self.agent_name_conflicts(&name, "");
-        if !conflicts.is_empty() {
-            return Err(AgentStartError::DuplicateName {
-                name,
-                candidates: conflicts,
-            });
+        let name = self.validate_agent_start(&params)?;
+        if params.transport.is_some() {
+            return self.start_remote_agent(params, name);
         }
 
         let cwd = params
@@ -205,6 +169,209 @@ impl App {
         Ok((agent, argv))
     }
 
+    pub(super) fn validate_agent_start(
+        &self,
+        params: &AgentStartParams,
+    ) -> Result<String, AgentStartError> {
+        let name = params.name.trim().to_string();
+        if name.is_empty() {
+            return Err(AgentStartError::InvalidName);
+        }
+        if params.argv.is_empty() {
+            return Err(AgentStartError::EmptyArgv);
+        }
+        let conflicts = self.agent_name_conflicts(&name, "");
+        if !conflicts.is_empty() {
+            return Err(AgentStartError::DuplicateName {
+                name,
+                candidates: conflicts,
+            });
+        }
+        Ok(name)
+    }
+
+    fn start_remote_agent(
+        &mut self,
+        params: AgentStartParams,
+        name: String,
+    ) -> Result<(crate::api::schema::AgentInfo, Vec<String>), AgentStartError> {
+        let remote = crate::remote_agent::start(&params)
+            .map_err(|err| AgentStartError::SpawnFailed(err.to_string()))?;
+        self.finish_remote_agent_start(params, name, remote)
+    }
+
+    pub(super) fn finish_remote_agent_start(
+        &mut self,
+        params: AgentStartParams,
+        name: String,
+        mut remote: crate::remote_agent::RemoteAgentStart,
+    ) -> Result<(crate::api::schema::AgentInfo, Vec<String>), AgentStartError> {
+        let current_name = match self.validate_agent_start(&params) {
+            Ok(current_name) => current_name,
+            Err(err) => {
+                remote.rollback();
+                return Err(err);
+            }
+        };
+        debug_assert_eq!(name, current_name);
+        let name = current_name;
+        let placement = match self.resolve_agent_start_placement(&params) {
+            Ok(placement) => placement,
+            Err(err) => {
+                remote.rollback();
+                return Err(err);
+            }
+        };
+        let local_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let attach_argv = remote.attach_argv.clone();
+        let focus = params.focus;
+        let (rows, cols) = self.state.estimate_pane_size();
+
+        let spawn_result = match placement {
+            AgentStartPlacement::Split {
+                ws_idx,
+                target_pane,
+                split,
+            } => self.spawn_agent_split(
+                ws_idx,
+                target_pane,
+                split,
+                local_cwd,
+                &attach_argv,
+                Vec::new(),
+                focus,
+            ),
+            AgentStartPlacement::NewWorkspace => {
+                self.spawn_agent_workspace(local_cwd, rows, cols, &attach_argv, Vec::new(), focus)
+            }
+        };
+        let (ws_idx, tab_idx, pane_id) = match spawn_result {
+            Ok(spawned) => spawned,
+            Err(err) => {
+                remote.rollback();
+                return Err(err);
+            }
+        };
+
+        let terminal_id = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.terminal_id(pane_id))
+            .cloned();
+        let Some(terminal_id) = terminal_id else {
+            remote.rollback();
+            return Err(AgentStartError::SpawnFailed("terminal disappeared".into()));
+        };
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            remote.rollback();
+            return Err(AgentStartError::SpawnFailed("terminal disappeared".into()));
+        };
+        terminal.set_agent_name(name.clone());
+        terminal.set_manual_label(name);
+        terminal.remote_agent_transport = Some(remote.transport.clone());
+        self.remote_owner_presentations
+            .insert(terminal_id.clone(), remote.delegation.clone());
+
+        if let Some(peer) = remote.peer.clone() {
+            if let Some(bridge) = remote.bridge.take() {
+                let connection_id = self
+                    .peer_bridges
+                    .entry(peer.id.clone())
+                    .or_default()
+                    .push(bridge);
+                self.remote_terminal_bridges
+                    .insert(terminal_id.clone(), (peer.id.clone(), connection_id));
+            }
+            self.state.peers.insert(peer.id.clone(), peer.clone());
+            self.start_peer_refresh(peer);
+        }
+        self.state.mark_session_dirty();
+
+        for event in crate::remote_agent::events_from_agent_info(
+            pane_id,
+            &remote.agent,
+            remote_transport_agent(&remote.transport),
+        ) {
+            self.handle_internal_event(event);
+        }
+        let mirror_cancel =
+            crate::remote_agent::spawn_mirror(remote.transport, pane_id, self.event_tx.clone());
+        self.remote_mirror_cancellations
+            .insert(terminal_id.to_string(), mirror_cancel);
+
+        let agent = self
+            .agent_info(ws_idx, pane_id)
+            .ok_or_else(|| AgentStartError::SpawnFailed("agent disappeared".into()))?;
+        debug_assert_eq!(agent.tab_id, self.public_tab_id(ws_idx, tab_idx).unwrap());
+        Ok((agent, attach_argv))
+    }
+
+    pub(super) fn resolve_agent_start_placement(
+        &self,
+        params: &AgentStartParams,
+    ) -> Result<AgentStartPlacement, AgentStartError> {
+        let split = params.split.clone().unwrap_or(SplitDirection::Right);
+        if let Some(tab_id) = params.tab_id.as_ref() {
+            let (ws_idx, tab_idx) =
+                self.parse_tab_id(tab_id)
+                    .ok_or_else(|| AgentStartError::TargetNotFound {
+                        target: tab_id.clone(),
+                    })?;
+            if let Some(workspace_id) = params.workspace_id.as_deref() {
+                let requested_ws_idx = self.parse_workspace_id(workspace_id).ok_or_else(|| {
+                    AgentStartError::TargetNotFound {
+                        target: workspace_id.to_string(),
+                    }
+                })?;
+                if requested_ws_idx != ws_idx {
+                    return Err(AgentStartError::PlacementConflict);
+                }
+            }
+            let target_pane = self.state.workspaces[ws_idx].tabs[tab_idx].layout.focused();
+            Ok(AgentStartPlacement::Split {
+                ws_idx,
+                target_pane,
+                split,
+            })
+        } else if let Some(workspace_id) = params.workspace_id.as_ref() {
+            let ws_idx = self.parse_workspace_id(workspace_id).ok_or_else(|| {
+                AgentStartError::TargetNotFound {
+                    target: workspace_id.clone(),
+                }
+            })?;
+            let tab_idx = self.state.workspaces[ws_idx].active_tab;
+            let target_pane = self.state.workspaces[ws_idx].tabs[tab_idx].layout.focused();
+            Ok(AgentStartPlacement::Split {
+                ws_idx,
+                target_pane,
+                split,
+            })
+        } else if self.state.workspaces.is_empty() {
+            Ok(AgentStartPlacement::NewWorkspace)
+        } else {
+            let ws_idx = self.state.active.unwrap_or(0);
+            let tab_idx = self.state.workspaces[ws_idx].active_tab;
+            let target_pane = self.state.workspaces[ws_idx].tabs[tab_idx].layout.focused();
+            Ok(AgentStartPlacement::Split {
+                ws_idx,
+                target_pane,
+                split,
+            })
+        }
+    }
+}
+
+pub(super) enum AgentStartPlacement {
+    NewWorkspace,
+    Split {
+        ws_idx: usize,
+        target_pane: crate::layout::PaneId,
+        split: SplitDirection,
+    },
+}
+
+impl App {
     pub(super) fn agent_start_error_body(
         &self,
         err: AgentStartError,
@@ -405,7 +572,7 @@ impl App {
         Ok((ws_idx, result.0, result.1.pane_id))
     }
 
-    fn agent_info(
+    pub(super) fn agent_info(
         &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
@@ -417,8 +584,11 @@ impl App {
             return None;
         }
         let pane = self.pane_info(ws_idx, pane_id)?;
-        Some(crate::api::schema::AgentInfo {
+        let mut info = crate::api::schema::AgentInfo {
             terminal_id: pane.terminal_id,
+            peer: None,
+            qualified_target: None,
+            presentation: None,
             name: terminal.agent_name.clone(),
             agent: pane.agent,
             title: pane.title,
@@ -428,6 +598,9 @@ impl App {
             custom_status: pane.custom_status,
             state_labels: pane.state_labels,
             agent_session: pane.agent_session,
+            transport: terminal.remote_agent_transport.clone(),
+            mirror_of_terminal_id: None,
+            attach: None,
             workspace_id: pane.workspace_id,
             tab_id: pane.tab_id,
             pane_id: pane.pane_id,
@@ -435,7 +608,26 @@ impl App {
             cwd: pane.cwd,
             foreground_cwd: pane.foreground_cwd,
             revision: pane.revision,
-        })
+        };
+        if let Some(presentation) = self
+            .remote_owner_presentations
+            .get(&pane_state.attached_terminal_id)
+        {
+            info.presentation = Some(crate::api::schema::AgentPresentationInfo {
+                origin_peer_id: presentation.origin_peer_id.clone(),
+                owner_peer_id: presentation.owner.peer_id.clone(),
+                route: presentation.owner.route.clone(),
+            });
+        }
+        if let Some(crate::api::schema::AgentTransportInfo::Ssh {
+            remote_cwd: Some(remote_cwd),
+            ..
+        }) = terminal.remote_agent_transport.as_ref()
+        {
+            info.cwd = Some(remote_cwd.clone());
+            info.foreground_cwd = Some(remote_cwd.clone());
+        }
+        Some(info)
     }
 
     fn agent_name_conflicts(
@@ -472,4 +664,10 @@ pub(super) enum AgentRenameError {
         name: String,
         candidates: Vec<crate::api::schema::AgentInfo>,
     },
+}
+
+fn remote_transport_agent(transport: &AgentTransportInfo) -> Option<&str> {
+    match transport {
+        AgentTransportInfo::Ssh { remote_agent, .. } => remote_agent.as_deref(),
+    }
 }

@@ -184,6 +184,184 @@ fn request_round_trips_for_agent_explain() {
 }
 
 #[test]
+fn agent_list_defaults_to_local_only_when_params_are_empty() {
+    let json = r#"{"id":"req_agent_list","method":"agent.list","params":{}}"#;
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::AgentList(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+    assert!(!params.include_peers);
+}
+
+#[test]
+fn peer_requests_round_trip() {
+    let request = Request {
+        id: "req_peer_register".into(),
+        method: Method::PeerRegister(PeerRegisterParams {
+            peer: PeerInfo {
+                id: "remote".into(),
+                label: "workbox".into(),
+                status: PeerStatus::Connected,
+                transport: PeerTransportInfo::Ssh {
+                    target: "workbox".into(),
+                    ssh_args: Vec::new(),
+                    managed_control_path: None,
+                    session: Some("agents".into()),
+                },
+            },
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "peer.register");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+
+    let connect = Request {
+        id: "req_peer_connect_ssh".into(),
+        method: Method::PeerConnectSsh(PeerConnectSshParams {
+            target: "workbox".into(),
+            ssh_args: vec!["-p".into(), "2222".into()],
+            managed_control_path: None,
+            session: Some("agents".into()),
+            label: Some("workbox".into()),
+            owner_pane_id: Some("w1:p1".into()),
+            owner: None,
+        }),
+    };
+
+    let json = serde_json::to_value(&connect).unwrap();
+    assert_eq!(json["method"], "peer.connect_ssh");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, connect);
+
+    let disconnect = Request {
+        id: "req_peer_disconnect_ssh".into(),
+        method: Method::PeerDisconnectSsh(PeerDisconnectSshParams {
+            peer_id: "workbox".into(),
+            connection_id: "bridge-1".into(),
+            activated_delegation: None,
+        }),
+    };
+    let json = serde_json::to_value(&disconnect).unwrap();
+    assert_eq!(json["method"], "peer.disconnect_ssh");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, disconnect);
+
+    let activation = Request {
+        id: "req_peer_presentation_activate".into(),
+        method: Method::PeerPresentationActivate(TerminalDelegationClaim {
+            delegation_id: "delegation-1".into(),
+            epoch: 3,
+        }),
+    };
+    let json = serde_json::to_value(&activation).unwrap();
+    assert_eq!(json["method"], "peer.presentation.activate");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, activation);
+
+    let keepalive = Request {
+        id: "req_peer_keepalive_ssh".into(),
+        method: Method::PeerKeepaliveSsh(PeerKeepaliveSshParams {
+            peer_id: "workbox".into(),
+            connection_id: "bridge-1".into(),
+        }),
+    };
+    let json = serde_json::to_value(&keepalive).unwrap();
+    assert_eq!(json["method"], "peer.keepalive_ssh");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, keepalive);
+
+    let health = Request {
+        id: "req_peer_health".into(),
+        method: Method::PeerHealth(PeerTarget {
+            peer_id: "remote".into(),
+        }),
+    };
+    let json = serde_json::to_value(&health).unwrap();
+    assert_eq!(json["method"], "peer.health");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, health);
+}
+
+#[test]
+fn terminal_delegation_requests_and_status_round_trip() {
+    let owner = TerminalPresentationOwner {
+        peer_id: "owner-a".into(),
+        pane_id: "w1:p1".into(),
+        route: vec!["owner-a".into()],
+    };
+    let requests = [
+        Request {
+            id: "create".into(),
+            method: Method::TerminalDelegateCreate(TerminalDelegateCreateParams {
+                cwd: Some("/work".into()),
+                label: Some("remote".into()),
+                env: HashMap::from([("SSH_AUTH_SOCK".into(), "/tmp/agent.sock".into())]),
+                owner: owner.clone(),
+            }),
+        },
+        Request {
+            id: "claim".into(),
+            method: Method::TerminalDelegateClaim(TerminalDelegateClaimParams {
+                target: "term_1".into(),
+                owner,
+                takeover: true,
+                terminate_on_expire: false,
+            }),
+        },
+        Request {
+            id: "status".into(),
+            method: Method::TerminalDelegateStatus(TerminalDelegationTarget {
+                delegation_id: "delegation-1".into(),
+                epoch: 2,
+            }),
+        },
+        Request {
+            id: "terminate".into(),
+            method: Method::TerminalDelegateTerminate(TerminalDelegationTarget {
+                delegation_id: "delegation-1".into(),
+                epoch: 2,
+            }),
+        },
+        Request {
+            id: "handoff".into(),
+            method: Method::TerminalDelegateHandoff(TerminalDelegateHandoffParams {
+                pane_id: "w2:p1".into(),
+            }),
+        },
+    ];
+
+    for request in requests {
+        let json = serde_json::to_value(&request).unwrap();
+        let restored: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, request);
+    }
+
+    let response = SuccessResponse {
+        id: "status".into(),
+        result: ResponseResult::TerminalDelegation {
+            delegation: TerminalDelegationInfo {
+                delegation_id: "delegation-1".into(),
+                epoch: 2,
+                terminal_id: "term_1".into(),
+                pane_id: "w2:p1".into(),
+                origin_peer_id: "host-b".into(),
+                owner: TerminalPresentationOwner {
+                    peer_id: "owner-a".into(),
+                    pane_id: "w1:p1".into(),
+                    route: vec!["owner-a".into(), "host-b".into()],
+                },
+                status: TerminalDelegationStatus::TakenOver,
+            },
+        },
+    };
+    let json = serde_json::to_value(&response).unwrap();
+    let restored: SuccessResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, response);
+}
+
+#[test]
 fn notification_show_request_parses() {
     let json = r#"{"id":"req_1","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}"#;
     let request: Request = serde_json::from_str(json).unwrap();
@@ -525,6 +703,8 @@ fn success_response_round_trips() {
             capabilities: Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                peer_federation: true,
+                remote_presentation: true,
             }),
         },
     };
@@ -1091,6 +1271,35 @@ fn event_wait_parses_typed_match() {
         EventMatch::PaneAgentStatusChanged {
             pane_id: "p_1".into(),
             agent_status: AgentStatus::Done,
+        }
+    );
+}
+
+#[test]
+fn event_wait_parses_agent_status_match_any() {
+    let json = r#"
+    {
+        "id": "req_10",
+        "method": "events.wait",
+        "params": {
+            "match_event": {
+                "event": "pane_agent_status_changed_any",
+                "pane_id": "p_1",
+                "agent_statuses": ["idle", "done"]
+            }
+        }
+    }
+    "#;
+
+    let request: Request = serde_json::from_str(json).unwrap();
+    let Method::EventsWait(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+    assert_eq!(
+        params.match_event,
+        EventMatch::PaneAgentStatusChangedAny {
+            pane_id: "p_1".into(),
+            agent_statuses: vec![AgentStatus::Idle, AgentStatus::Done],
         }
     );
 }

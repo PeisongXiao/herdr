@@ -51,6 +51,44 @@ pub struct WorktreeRemoveResult {
     pub result: Result<(), String>,
 }
 
+#[derive(Debug)]
+pub struct PeerConnectSshResult {
+    pub id: String,
+    pub peer_id: String,
+    pub generation: u64,
+    pub owner_terminal_id: Option<crate::terminal::TerminalId>,
+    pub result: Result<crate::remote_agent::RemoteShellConnect, String>,
+    pub respond_to: std::sync::mpsc::Sender<String>,
+}
+
+#[derive(Debug)]
+pub struct RemoteAgentStartResult {
+    pub id: String,
+    pub params: crate::api::schema::AgentStartParams,
+    pub initial_name: String,
+    pub result: Result<crate::remote_agent::RemoteAgentStart, String>,
+    pub respond_to: std::sync::mpsc::Sender<String>,
+}
+
+#[derive(Debug)]
+pub struct PeerAgentRequestResult {
+    pub id: String,
+    pub peer: crate::api::schema::PeerInfo,
+    pub request: crate::api::schema::Request,
+    pub owner_terminal_id: Option<crate::terminal::TerminalId>,
+    pub result: Result<serde_json::Value, String>,
+    pub respond_to: std::sync::mpsc::Sender<String>,
+}
+
+#[derive(Debug)]
+pub struct PeerHealthRequestResult {
+    pub id: String,
+    pub peer: crate::api::schema::PeerInfo,
+    pub generation: u64,
+    pub result: Result<serde_json::Value, String>,
+    pub respond_to: std::sync::mpsc::Sender<String>,
+}
+
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
@@ -126,6 +164,32 @@ pub enum AppEvent {
     AgentDetectionManifestsUpdated {
         updated: Vec<crate::detect::manifest_update::ManifestUpdateCommit>,
         status: crate::detect::manifest_update::ManifestUpdateStatus,
+    },
+    /// A background peer refresh completed without blocking the app loop.
+    PeerAgentsRefreshed {
+        peer_id: String,
+        generation: u64,
+        observed_at: Instant,
+        result: Result<Vec<crate::api::schema::AgentInfo>, String>,
+    },
+    /// SSH peer setup completed outside the app loop.
+    PeerConnectSshFinished(Box<PeerConnectSshResult>),
+    /// Remote agent setup completed outside the app loop.
+    RemoteAgentStartFinished(Box<RemoteAgentStartResult>),
+    /// A peer-routed agent operation completed outside the app loop.
+    PeerAgentRequestFinished(Box<PeerAgentRequestResult>),
+    /// A peer health operation completed outside the app loop.
+    PeerHealthRequestFinished(Box<PeerHealthRequestResult>),
+    /// A prepared owner-side presentation was observed as active or expired remotely.
+    RemotePresentationActivationObserved {
+        delegation_id: String,
+        activated: bool,
+    },
+    /// A remote mirror refreshed presentation metadata that belongs on the local transport.
+    #[cfg(unix)]
+    RemoteAgentInfoMirrored {
+        pane_id: PaneId,
+        remote_cwd: Option<String>,
     },
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.

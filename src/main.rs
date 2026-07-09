@@ -84,11 +84,13 @@ mod pty;
 mod raw_input;
 mod release_notes;
 mod remote;
+mod remote_agent;
 mod render_prof;
 mod selection;
 mod server;
 mod session;
 mod sound;
+mod ssh_integration;
 mod terminal;
 mod terminal_modes;
 mod terminal_notify;
@@ -348,6 +350,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # force keepalive or multiplexing off, it only stops herdr from adding its own.
 # manage_ssh_config = true
 
+# Intercept interactive `ssh <host>` inside Herdr panes and attach to the
+# remote host's Herdr server instead of opening a raw SSH shell. Unsupported
+# ssh forms fall through to the real ssh binary.
+# ssh_integration = true
+
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.
 # allow_nested = false
@@ -411,8 +418,52 @@ fn exit_if_nested_disabled(config: &config::Config) {
     }
 }
 
+fn raw_ssh_dispatch(
+    args: &[std::ffi::OsString],
+) -> Option<(Option<String>, &[std::ffi::OsString])> {
+    let mut session = None;
+    let mut index = 1;
+    while index < args.len() {
+        let arg = args[index].to_str()?;
+        if arg == "--session" {
+            session = Some(args.get(index + 1)?.to_str()?.to_string());
+            index += 2;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--session=") {
+            session = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        return (arg == "ssh").then(|| (session, &args[index + 1..]));
+    }
+    None
+}
+
 fn main() -> io::Result<()> {
-    let raw_args: Vec<String> = std::env::args().collect();
+    let raw_os_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some((session_name, ssh_args)) = raw_ssh_dispatch(&raw_os_args) {
+        if let Some(session_name) = session_name {
+            if let Err(err) = session::configure_from_args(&[
+                raw_os_args[0].to_string_lossy().into_owned(),
+                "--session".into(),
+                session_name,
+            ]) {
+                eprintln!("error: {err}");
+                std::process::exit(2);
+            }
+        }
+        std::process::exit(cli::run_ssh_os_command(ssh_args)?);
+    }
+    let raw_args = raw_os_args
+        .into_iter()
+        .map(|arg| {
+            arg.into_string().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "herdr arguments must be UTF-8")
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+
     let args = match session::configure_from_args(&raw_args) {
         Ok(args) => args,
         Err(err) => {
@@ -511,6 +562,8 @@ fn main() -> io::Result<()> {
         println!("       herdr tab <subcommand> ...");
         println!("       herdr notification <subcommand> ...");
         println!("       herdr agent <subcommand> ...");
+        println!("       herdr ssh <ssh-args...>");
+        println!("       herdr remote-handoff");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr wait <subcommand> ...");
         println!("       herdr session <subcommand> ...");
@@ -565,6 +618,14 @@ fn main() -> io::Result<()> {
             (
                 "herdr agent <subcommand>",
                 "Agent/terminal helpers over the socket API",
+            ),
+            (
+                "herdr ssh <target>",
+                "Attach to a remote Herdr server from inside a pane",
+            ),
+            (
+                "herdr remote-handoff",
+                "Keep the current delegated pane on its remote host",
             ),
             (
                 "herdr pane <subcommand>",
@@ -647,6 +708,7 @@ fn main() -> io::Result<()> {
                 "channel",
                 "workspace",
                 "worktree",
+                "ssh",
                 "pane",
                 "wait",
                 "session",
@@ -692,7 +754,16 @@ fn main() -> io::Result<()> {
 
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
-    let _api_server = match api::start_server_with_capabilities(api_tx, event_hub.clone(), None) {
+    let _api_server = match api::start_server_with_capabilities(
+        api_tx,
+        event_hub.clone(),
+        Some(api::schema::ServerCapabilities {
+            live_handoff: false,
+            detached_server_daemon: false,
+            peer_federation: cfg!(unix),
+            remote_presentation: false,
+        }),
+    ) {
         Ok(server) => server,
         Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
             eprintln!("error: herdr is already running");
@@ -838,5 +909,47 @@ mod tests {
         assert!(NESTED_HERDR_MESSAGES
             .iter()
             .all(|message| !message.starts_with("herdr:")));
+    }
+
+    #[test]
+    fn ssh_dispatch_preserves_exact_argv_before_global_preprocessing() {
+        let raw_args = [
+            "/tmp/herdr",
+            "ssh",
+            "workbox",
+            "--session",
+            "remote-session",
+            "--remote",
+            "nested-target",
+            "--handoff",
+        ]
+        .map(std::ffi::OsString::from)
+        .to_vec();
+
+        let (session, dispatched) = raw_ssh_dispatch(&raw_args).unwrap();
+
+        assert!(session.is_none());
+        assert_eq!(dispatched, &raw_args[2..]);
+        assert_eq!(dispatched.as_ptr(), raw_args[2..].as_ptr());
+    }
+
+    #[test]
+    fn ssh_dispatch_accepts_a_global_session_without_touching_ssh_arguments() {
+        let raw_args = [
+            "/tmp/herdr",
+            "--session",
+            "work",
+            "ssh",
+            "workbox",
+            "--session",
+            "remote-session",
+        ]
+        .map(std::ffi::OsString::from)
+        .to_vec();
+
+        let (session, dispatched) = raw_ssh_dispatch(&raw_args).unwrap();
+
+        assert_eq!(session.as_deref(), Some("work"));
+        assert_eq!(dispatched, &raw_args[4..]);
     }
 }

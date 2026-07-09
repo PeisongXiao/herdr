@@ -70,6 +70,21 @@ If Herdr is an input in your own flake, update that input and rebuild your syste
 nix flake update herdr
 ```
 
+## Install from source
+
+From a Herdr checkout, use the local installer:
+
+```bash
+./install-local.sh --check
+./install-local.sh
+```
+
+The script supports Linux and macOS on x86_64 and aarch64. It requires Bash, usable `cargo` and `rustc` commands, exactly Zig `0.15.2`, and a working C compiler/linker. It uses `CC` when set; otherwise it selects the first available command from `cc`, `clang`, and `gcc`. It reports each missing or unusable build tool explicitly but does not run a package manager for you. Set `ZIG=/path/to/zig` when the required Zig is not the default `zig` on `PATH`. Cross-target Cargo builds are rejected because the installer only installs a native binary from the checkout.
+
+`--check` runs `cargo --version` and `rustc --version`, compiles and links a minimal C program with the selected compiler, validates the exact Zig version, and reports the platform, resolved Zig executable, isolated build cache, and destination without building Herdr. The default is a locked release build installed atomically to `$HOME/.local/bin/herdr`. Build artifacts use a checkout-specific directory under `${XDG_CACHE_HOME:-$HOME/.cache}/herdr/install-local`, preventing artifacts produced from another checkout path or a Docker bind mount from contributing stale native-library paths. An explicit `CARGO_TARGET_DIR` overrides that cache. Use `--prefix DIR` (or `PREFIX`) to change the install prefix, `--bin-dir DIR` to choose the binary directory directly, and `--debug` for a debug build. The script warns when the destination is not on `PATH`; direct SSH federation still discovers the default `~/.local/bin/herdr` location.
+
+To upgrade a source install, update the checkout and rerun the script. Replacing the file does not replace an already-running Herdr server process: restart that session or perform a supported live handoff before expecting it to use the new build. Agent integrations are separate and are not installed or upgraded by `install-local.sh`.
+
 ## Download manually
 
 You can also download a binary from [GitHub releases](https://github.com/ogulcancelik/herdr/releases).

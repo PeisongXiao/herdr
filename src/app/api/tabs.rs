@@ -267,7 +267,12 @@ impl App {
             },
         });
 
-        encode_success(id, ResponseResult::Ok {})
+        encode_success(
+            id,
+            ResponseResult::Ok {
+                terminated_remote_presentations: None,
+            },
+        )
     }
 
     fn tab_list_info(&self, ws_idx: usize) -> Vec<crate::api::schema::TabInfo> {

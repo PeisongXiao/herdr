@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 16,
+  "protocol": 17,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -1122,6 +1122,34 @@
     },
     "request": {
       "$defs": {
+        "AgentAttachPrepareParams": {
+          "properties": {
+            "owner_pane_id": {
+              "type": "string"
+            },
+            "takeover": {
+              "default": false,
+              "type": "boolean"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "owner_pane_id"
+          ],
+          "type": "object"
+        },
+        "AgentListParams": {
+          "properties": {
+            "include_peers": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
         "AgentReadParams": {
           "properties": {
             "format": {
@@ -1187,6 +1215,12 @@
         },
         "AgentStartParams": {
           "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "argv": {
               "items": {
                 "type": "string"
@@ -1212,6 +1246,12 @@
             "name": {
               "type": "string"
             },
+            "peer": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "split": {
               "anyOf": [
                 {
@@ -1228,6 +1268,16 @@
                 "null"
               ]
             },
+            "transport": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentStartTransport"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "workspace_id": {
               "type": [
                 "string",
@@ -1240,6 +1290,48 @@
             "argv"
           ],
           "type": "object"
+        },
+        "AgentStartTransport": {
+          "oneOf": [
+            {
+              "properties": {
+                "managed_control_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "prepare_integration": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "session": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ssh_args": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "target": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "ssh",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "target"
+              ],
+              "type": "object"
+            }
+          ]
         },
         "AgentStatus": {
           "enum": [
@@ -1627,6 +1719,29 @@
                 "event",
                 "pane_id",
                 "agent_status"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "agent_statuses": {
+                  "items": {
+                    "$ref": "#/schemas/request/$defs/AgentStatus"
+                  },
+                  "type": "array"
+                },
+                "event": {
+                  "const": "pane_agent_status_changed_any",
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "event",
+                "pane_id",
+                "agent_statuses"
               ],
               "type": "object"
             }
@@ -2662,6 +2777,197 @@
           },
           "type": "object"
         },
+        "PeerConnectSshParams": {
+          "properties": {
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "managed_control_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/TerminalPresentationOwner"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "owner_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ssh_args": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
+        "PeerDisconnectSshParams": {
+          "properties": {
+            "activated_delegation": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/TerminalDelegationClaim"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "connection_id": {
+              "type": "string"
+            },
+            "peer_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "peer_id",
+            "connection_id"
+          ],
+          "type": "object"
+        },
+        "PeerInfo": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/request/$defs/PeerStatus"
+            },
+            "transport": {
+              "$ref": "#/schemas/request/$defs/PeerTransportInfo"
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "status",
+            "transport"
+          ],
+          "type": "object"
+        },
+        "PeerKeepaliveSshParams": {
+          "properties": {
+            "connection_id": {
+              "type": "string"
+            },
+            "peer_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "peer_id",
+            "connection_id"
+          ],
+          "type": "object"
+        },
+        "PeerRegisterParams": {
+          "properties": {
+            "peer": {
+              "$ref": "#/schemas/request/$defs/PeerInfo"
+            }
+          },
+          "required": [
+            "peer"
+          ],
+          "type": "object"
+        },
+        "PeerStatus": {
+          "enum": [
+            "connected",
+            "disconnected"
+          ],
+          "type": "string"
+        },
+        "PeerTarget": {
+          "properties": {
+            "peer_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "peer_id"
+          ],
+          "type": "object"
+        },
+        "PeerTransportInfo": {
+          "oneOf": [
+            {
+              "properties": {
+                "session": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ssh_args": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "target": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "ssh",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "target"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "api_socket": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "api_socket",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "api_socket"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "PingParams": {
           "type": "object"
         },
@@ -3506,6 +3812,123 @@
           ],
           "type": "object"
         },
+        "TerminalDelegateClaimParams": {
+          "properties": {
+            "owner": {
+              "$ref": "#/schemas/request/$defs/TerminalPresentationOwner"
+            },
+            "takeover": {
+              "default": false,
+              "type": "boolean"
+            },
+            "target": {
+              "type": "string"
+            },
+            "terminate_on_expire": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "target",
+            "owner"
+          ],
+          "type": "object"
+        },
+        "TerminalDelegateCreateParams": {
+          "properties": {
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner": {
+              "$ref": "#/schemas/request/$defs/TerminalPresentationOwner"
+            }
+          },
+          "required": [
+            "owner"
+          ],
+          "type": "object"
+        },
+        "TerminalDelegateHandoffParams": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "TerminalDelegationClaim": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "epoch": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "epoch"
+          ],
+          "type": "object"
+        },
+        "TerminalDelegationTarget": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "epoch": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "epoch"
+          ],
+          "type": "object"
+        },
+        "TerminalPresentationOwner": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "peer_id": {
+              "type": "string"
+            },
+            "route": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "peer_id",
+            "pane_id"
+          ],
+          "type": "object"
+        },
         "ToastHerdrPosition": {
           "enum": [
             "top-left",
@@ -4186,7 +4609,7 @@
               "type": "string"
             },
             "params": {
-              "$ref": "#/schemas/request/$defs/EmptyParams"
+              "$ref": "#/schemas/request/$defs/AgentListParams"
             }
           },
           "required": [
@@ -4299,6 +4722,214 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentStartParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.attach.prepare",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentAttachPrepareParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.agent.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.agent.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.agent.read",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.agent.explain",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.agent.send",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentSendParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.agent.rename",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.agent.start",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentStartParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalDelegateCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.claim",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalDelegateClaimParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalDelegationTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.terminate",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalDelegationTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.handoff",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalDelegateHandoffParams"
             }
           },
           "required": [
@@ -4790,6 +5421,134 @@
         {
           "properties": {
             "method": {
+              "const": "peer.register",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PeerRegisterParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.connect_ssh",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PeerConnectSshParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.disconnect_ssh",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PeerDisconnectSshParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.keepalive_ssh",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PeerKeepaliveSshParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.presentation.activate",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalDelegationClaim"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.unregister",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PeerTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "peer.health",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PeerTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.wait_for_output",
               "type": "string"
             },
@@ -5244,6 +6003,119 @@
     },
     "success_response": {
       "$defs": {
+        "AgentAttachInfo": {
+          "oneOf": [
+            {
+              "properties": {
+                "delegation": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/TerminalDelegationClaim"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "managed_control_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "session": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ssh_args": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "target": {
+                  "type": "string"
+                },
+                "terminal_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "ssh",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "target",
+                "terminal_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "managed_control_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "session": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ssh_args": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "target": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "ssh_shell",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "target"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AgentAttachPrepared": {
+          "properties": {
+            "attach": {
+              "$ref": "#/schemas/success_response/$defs/AgentAttachInfo"
+            },
+            "delegation": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/TerminalDelegationInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "attach"
+          ],
+          "type": "object"
+        },
         "AgentInfo": {
           "properties": {
             "agent": {
@@ -5264,6 +6136,16 @@
             },
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "attach": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentAttachInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "custom_status": {
               "type": [
@@ -5292,6 +6174,12 @@
                 "null"
               ]
             },
+            "mirror_of_terminal_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "name": {
               "type": [
                 "string",
@@ -5300,6 +6188,28 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "peer": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "presentation": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentPresentationInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "qualified_target": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "revision": {
               "format": "uint64",
@@ -5325,6 +6235,16 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "transport": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentTransportInfo"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "workspace_id": {
@@ -5403,6 +6323,27 @@
           ],
           "type": "object"
         },
+        "AgentPresentationInfo": {
+          "properties": {
+            "origin_peer_id": {
+              "type": "string"
+            },
+            "owner_peer_id": {
+              "type": "string"
+            },
+            "route": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "origin_peer_id",
+            "owner_peer_id"
+          ],
+          "type": "object"
+        },
         "AgentSessionInfo": {
           "properties": {
             "agent": {
@@ -5442,6 +6383,58 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "AgentTransportInfo": {
+          "oneOf": [
+            {
+              "properties": {
+                "remote_agent": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "remote_cwd": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "remote_pane_id": {
+                  "type": "string"
+                },
+                "remote_terminal_id": {
+                  "type": "string"
+                },
+                "session": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ssh_args": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "target": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "ssh",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "target",
+                "remote_terminal_id",
+                "remote_pane_id"
+              ],
+              "type": "object"
+            }
+          ]
         },
         "ClientWindowTitleReason": {
           "enum": [
@@ -7046,6 +8039,84 @@
           ],
           "type": "object"
         },
+        "PeerInfo": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/PeerStatus"
+            },
+            "transport": {
+              "$ref": "#/schemas/success_response/$defs/PeerTransportInfo"
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "status",
+            "transport"
+          ],
+          "type": "object"
+        },
+        "PeerStatus": {
+          "enum": [
+            "connected",
+            "disconnected"
+          ],
+          "type": "string"
+        },
+        "PeerTransportInfo": {
+          "oneOf": [
+            {
+              "properties": {
+                "session": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ssh_args": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "target": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "ssh",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "target"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "api_socket": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "api_socket",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "api_socket"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "PluginActionContext": {
           "enum": [
             "global",
@@ -7901,6 +8972,97 @@
             },
             {
               "properties": {
+                "peer": {
+                  "$ref": "#/schemas/success_response/$defs/PeerInfo"
+                },
+                "type": {
+                  "const": "peer_info",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "peer"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "attach": {
+                  "$ref": "#/schemas/success_response/$defs/AgentAttachInfo"
+                },
+                "connection_id": {
+                  "type": "string"
+                },
+                "peer": {
+                  "$ref": "#/schemas/success_response/$defs/PeerInfo"
+                },
+                "type": {
+                  "const": "peer_ssh_connected",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "peer",
+                "connection_id",
+                "attach"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "peers": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/PeerInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "peer_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "peers"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "prepared": {
+                  "$ref": "#/schemas/success_response/$defs/AgentAttachPrepared"
+                },
+                "type": {
+                  "const": "agent_attach_prepared",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "prepared"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delegation": {
+                  "$ref": "#/schemas/success_response/$defs/TerminalDelegationInfo"
+                },
+                "type": {
+                  "const": "terminal_delegation",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delegation"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane": {
                   "$ref": "#/schemas/success_response/$defs/PaneInfo"
                 },
@@ -8586,6 +9748,14 @@
             },
             {
               "properties": {
+                "terminated_remote_presentations": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "type": {
                   "const": "ok",
                   "type": "string"
@@ -8605,6 +9775,14 @@
               "type": "boolean"
             },
             "live_handoff": {
+              "type": "boolean"
+            },
+            "peer_federation": {
+              "default": false,
+              "type": "boolean"
+            },
+            "remote_presentation": {
+              "default": false,
               "type": "boolean"
             }
           },
@@ -8726,6 +9904,92 @@
             "focused",
             "pane_count",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "TerminalDelegationClaim": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "epoch": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "epoch"
+          ],
+          "type": "object"
+        },
+        "TerminalDelegationInfo": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "epoch": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "origin_peer_id": {
+              "type": "string"
+            },
+            "owner": {
+              "$ref": "#/schemas/success_response/$defs/TerminalPresentationOwner"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/TerminalDelegationStatus"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "epoch",
+            "terminal_id",
+            "pane_id",
+            "origin_peer_id",
+            "owner",
+            "status"
+          ],
+          "type": "object"
+        },
+        "TerminalDelegationStatus": {
+          "enum": [
+            "pending",
+            "active",
+            "taken_over",
+            "handed_off",
+            "terminated",
+            "failed"
+          ],
+          "type": "string"
+        },
+        "TerminalPresentationOwner": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "peer_id": {
+              "type": "string"
+            },
+            "route": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "peer_id",
+            "pane_id"
           ],
           "type": "object"
         },

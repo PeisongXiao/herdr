@@ -2735,6 +2735,8 @@ mod tests {
                 capabilities: Some(crate::api::schema::ServerCapabilities {
                     live_handoff: true,
                     detached_server_daemon: true,
+                    peer_federation: true,
+                    remote_presentation: true,
                 }),
             },
         };

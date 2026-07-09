@@ -1293,8 +1293,11 @@ pub(crate) struct PaneFocusTarget {
 pub struct AppState {
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
+    pub peers: std::collections::HashMap<String, crate::api::schema::PeerInfo>,
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
+    pub(crate) delegated_terminal_ids:
+        std::collections::HashMap<PaneId, crate::terminal::TerminalId>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -1652,7 +1655,9 @@ impl AppState {
     pub fn test_new() -> Self {
         Self {
             terminals: std::collections::HashMap::new(),
+            peers: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
+            delegated_terminal_ids: std::collections::HashMap::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),
@@ -1963,6 +1968,25 @@ impl AppState {
             }
         }
 
+        for (pane_id, terminal_id) in &self.delegated_terminal_ids {
+            assert!(
+                pane_ids.insert(*pane_id),
+                "delegated pane {:?} also appears in an active workspace",
+                pane_id
+            );
+            assert!(
+                attached_terminal_ids.insert(terminal_id.clone()),
+                "delegated terminal {} also appears in an active pane",
+                terminal_id
+            );
+            assert!(
+                self.terminals.contains_key(terminal_id),
+                "delegated pane {:?} is attached to missing terminal {}",
+                pane_id,
+                terminal_id
+            );
+        }
+
         let assert_live_pane = |pane_id: PaneId, context: &str| {
             assert!(
                 pane_ids.contains(&pane_id),
@@ -2005,7 +2029,9 @@ impl AppState {
             assert_live_pane(pane_id, &format!("raw pane alias {raw}"));
         }
         for (public_id, &pane_id) in &self.public_pane_id_aliases {
-            assert_live_pane(pane_id, &format!("public pane alias {public_id}"));
+            if !self.delegated_terminal_ids.contains_key(&pane_id) {
+                assert_live_pane(pane_id, &format!("public pane alias {public_id}"));
+            }
         }
         if let Some(focus) = &self.previous_pane_focus {
             assert_workspace_pane(&focus.workspace_id, focus.pane_id, "previous pane focus");

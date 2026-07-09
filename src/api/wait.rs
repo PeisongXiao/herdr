@@ -17,6 +17,8 @@ use crate::api::subscriptions::{match_output, output_match_read_source};
 use crate::api::{ApiRequestSender, EventHub};
 use crate::ipc::LocalStream;
 
+const MAX_EVENT_WAIT_AGENT_STATUSES: usize = 5;
+
 pub(super) fn wait_for_output(
     request_id: String,
     params: crate::api::schema::PaneWaitForOutputParams,
@@ -138,23 +140,27 @@ pub(super) fn wait_for_event(
         .timeout_ms
         .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
 
-    let subscription = match event_match_subscription(&request_id, params.match_event) {
-        Ok(subscription) => subscription,
+    let subscriptions = match event_match_subscriptions(&request_id, params.match_event) {
+        Ok(subscriptions) => subscriptions,
         Err(response) => return Ok(Some(serde_json::to_string(&response).unwrap())),
     };
-    let mut active = match ActiveSubscription::new(subscription, &request_id, 0, api_tx, event_hub)
-    {
-        Ok(active) => active,
-        Err(response) => return Ok(Some(serde_json::to_string(&response).unwrap())),
-    };
+    let mut active = Vec::with_capacity(subscriptions.len());
+    for (index, subscription) in subscriptions.into_iter().enumerate() {
+        match ActiveSubscription::new(subscription, &request_id, index, api_tx, event_hub) {
+            Ok(subscription) => active.push(subscription),
+            Err(response) => return Ok(Some(serde_json::to_string(&response).unwrap())),
+        }
+    }
 
     loop {
         if should_stop_connection(stream, running)? {
             return Ok(None);
         }
 
-        if let Some(event) = active.poll(api_tx, event_hub) {
-            return Ok(Some(wait_matched_response(&request_id, event)));
+        for subscription in &mut active {
+            if let Some(event) = subscription.poll(api_tx, event_hub) {
+                return Ok(Some(wait_matched_response(&request_id, event)));
+            }
         }
 
         if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
@@ -174,18 +180,51 @@ pub(super) fn wait_for_event(
     }
 }
 
-fn event_match_subscription(
+fn event_match_subscriptions(
     request_id: &str,
     match_event: EventMatch,
-) -> Result<Subscription, ErrorResponse> {
+) -> Result<Vec<Subscription>, ErrorResponse> {
     match match_event {
         EventMatch::PaneAgentStatusChanged {
             pane_id,
             agent_status,
-        } => Ok(Subscription::PaneAgentStatusChanged {
+        } => Ok(vec![Subscription::PaneAgentStatusChanged {
             pane_id,
             agent_status: Some(agent_status),
-        }),
+        }]),
+        EventMatch::PaneAgentStatusChangedAny {
+            pane_id,
+            agent_statuses,
+        } => {
+            if agent_statuses.is_empty() {
+                return Err(invalid_event_wait_match(
+                    request_id,
+                    "agent_statuses must contain at least one status",
+                ));
+            }
+            if agent_statuses.len() > MAX_EVENT_WAIT_AGENT_STATUSES {
+                return Err(invalid_event_wait_match(
+                    request_id,
+                    &format!(
+                        "agent_statuses cannot contain more than {MAX_EVENT_WAIT_AGENT_STATUSES} statuses"
+                    ),
+                ));
+            }
+
+            let mut unique_statuses = Vec::with_capacity(agent_statuses.len());
+            for status in agent_statuses {
+                if !unique_statuses.contains(&status) {
+                    unique_statuses.push(status);
+                }
+            }
+            Ok(unique_statuses
+                .into_iter()
+                .map(|agent_status| Subscription::PaneAgentStatusChanged {
+                    pane_id: pane_id.clone(),
+                    agent_status: Some(agent_status),
+                })
+                .collect())
+        }
         _ => Err(ErrorResponse {
             id: request_id.into(),
             error: ErrorBody {
@@ -193,6 +232,16 @@ fn event_match_subscription(
                 message: "events.wait currently supports pane agent status matches".into(),
             },
         }),
+    }
+}
+
+fn invalid_event_wait_match(request_id: &str, message: &str) -> ErrorResponse {
+    ErrorResponse {
+        id: request_id.into(),
+        error: ErrorBody {
+            code: "invalid_event_wait_match".into(),
+            message: message.into(),
+        },
     }
 }
 
@@ -238,4 +287,59 @@ fn wait_matched_response(request_id: &str, event: serde_json::Value) -> String {
         },
     })
     .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::schema::AgentStatus;
+
+    #[test]
+    fn agent_status_match_any_deduplicates_filters() {
+        let subscriptions = event_match_subscriptions(
+            "wait",
+            EventMatch::PaneAgentStatusChangedAny {
+                pane_id: "pane_1".into(),
+                agent_statuses: vec![AgentStatus::Idle, AgentStatus::Done, AgentStatus::Idle],
+            },
+        )
+        .expect("valid match-any filter");
+
+        assert_eq!(
+            subscriptions,
+            vec![
+                Subscription::PaneAgentStatusChanged {
+                    pane_id: "pane_1".into(),
+                    agent_status: Some(AgentStatus::Idle),
+                },
+                Subscription::PaneAgentStatusChanged {
+                    pane_id: "pane_1".into(),
+                    agent_status: Some(AgentStatus::Done),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_status_match_any_rejects_empty_and_oversized_filters() {
+        let empty = event_match_subscriptions(
+            "empty",
+            EventMatch::PaneAgentStatusChangedAny {
+                pane_id: "pane_1".into(),
+                agent_statuses: Vec::new(),
+            },
+        )
+        .expect_err("empty match-any filter should fail");
+        assert_eq!(empty.error.code, "invalid_event_wait_match");
+
+        let oversized = event_match_subscriptions(
+            "oversized",
+            EventMatch::PaneAgentStatusChangedAny {
+                pane_id: "pane_1".into(),
+                agent_statuses: vec![AgentStatus::Idle; MAX_EVENT_WAIT_AGENT_STATUSES + 1],
+            },
+        )
+        .expect_err("oversized match-any filter should fail");
+        assert_eq!(oversized.error.code, "invalid_event_wait_match");
+    }
 }
