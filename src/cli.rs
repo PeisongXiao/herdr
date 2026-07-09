@@ -17,6 +17,8 @@ use crate::api::schema::{
 mod agent;
 mod api;
 mod completion;
+#[cfg(target_os = "macos")]
+mod desktop;
 mod integration;
 mod notification;
 mod pane;
@@ -72,6 +74,8 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     };
 
     let exit_code = match command {
+        #[cfg(target_os = "macos")]
+        "desktop" => desktop::run_desktop_command(&args[2..])?,
         "server" => {
             let Some(exit_code) = server::run_server_command(&args[2..])? else {
                 return Ok(CommandOutcome::NotCli);

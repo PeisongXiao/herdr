@@ -45,6 +45,9 @@ schemars = { version = "1.2.1", features = ["derive"] }
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+getrandom = "=0.3.4"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Wdk_System_Threading",
