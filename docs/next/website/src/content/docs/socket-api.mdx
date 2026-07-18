@@ -17,11 +17,11 @@ Most automation should start with the CLI wrappers. Use the raw socket API only 
 
 The layers share the same control surface.
 
-## macOS Codex desktop MCP
+## Desktop MCP bridge
 
-On macOS, Codex desktop can start Herdr's local STDIO MCP bridge as a child process. Both entry points are intentionally hidden from Herdr help, completions, menus, and integration lists: `herdr --session NAME mcp serve` runs the bridge, while a CLI launched by that bridge can use `herdr desktop enqueue` to append a message for later desktop inspection. Codex still shows the configured MCP server in its own Settings and `/mcp` UI.
+On macOS and Linux, any MCP-capable coding agent can start Herdr's local STDIO MCP bridge as a child process. Both entry points are intentionally hidden from Herdr help, completions, menus, and integration lists: `herdr --session NAME mcp serve` runs the bridge, while a CLI launched by that bridge can use `herdr desktop enqueue` to append a message for later desktop inspection. The client still shows the configured MCP server in its own settings UI.
 
-Register it manually in the shared Codex configuration, using the absolute path to the Herdr binary:
+Register the bridge with your agent's MCP configuration, using the absolute path to the Herdr binary. For Codex desktop, edit the shared Codex configuration:
 
 ```toml
 [mcp_servers.herdr]
@@ -43,9 +43,22 @@ enabled_tools = [
 default_tools_approval_mode = "writes"
 ```
 
-The bridge exposes exactly those ten tools. Health, snapshot, pane read, and process inspection are read-only. Launch, send, interrupt, and stop apply only to CLIs launched and registered by this MCP process; arbitrary panes remain inspectable but cannot be mutated through the bridge. It never exposes raw API forwarding, Herdr server start/stop/restart, subscriptions, focus or takeover, integrations, plugins, or Codex task lifecycle. Codex owns the MCP child and closing its stdin ends it without changing the Herdr server.
+Clients that use JSON MCP configuration, such as Claude Code, Claude Desktop, or Cursor, register the same command and arguments:
 
-Each launched CLI receives a capability-scoped, local queue through reserved `HERDR_DESKTOP_*` environment variables. `herdr desktop enqueue` can only append bounded UTF-8 messages to that queue; it has no Herdr API client and cannot control its process, pane, server, or MCP lifecycle. Messages persist while Codex, the MCP child, or Herdr is stopped. `herdr_drain_messages` atomically leases a FIFO batch instead of deleting it, and `herdr_ack_messages` explicitly and idempotently removes the leased messages after the desktop has handled them. An unacknowledged expired lease returns to the queue, so inspection does not silently lose messages.
+```json
+{
+  "mcpServers": {
+    "herdr": {
+      "command": "/absolute/path/to/herdr",
+      "args": ["--session", "default", "mcp", "serve"]
+    }
+  }
+}
+```
+
+The bridge exposes exactly the ten tools listed above. Health, snapshot, pane read, and process inspection are read-only. Launch, send, interrupt, and stop apply only to CLIs launched and registered by this MCP process; arbitrary panes remain inspectable but cannot be mutated through the bridge. It never exposes raw API forwarding, Herdr server start/stop/restart, subscriptions, focus or takeover, integrations, plugins, or the client's own task lifecycle. The client owns the MCP child and closing its stdin ends it without changing the Herdr server.
+
+Each launched CLI receives a capability-scoped, local queue through reserved `HERDR_DESKTOP_*` environment variables. `herdr desktop enqueue` can only append bounded UTF-8 messages to that queue; it has no Herdr API client and cannot control its process, pane, server, or MCP lifecycle. Messages persist while the desktop client, the MCP child, or Herdr is stopped. `herdr_drain_messages` atomically leases a FIFO batch instead of deleting it, and `herdr_ack_messages` explicitly and idempotently removes the leased messages after the client has handled them. An unacknowledged expired lease returns to the queue, so inspection does not silently lose messages.
 
 The enqueue command accepts exactly one message source:
 
@@ -56,7 +69,7 @@ herdr desktop enqueue [--kind info|progress|result|question|error] [--correlatio
 
 Messages are UTF-8 and at most 64 KiB; `kind` defaults to `info`. One channel retains at most 1,000 messages or 8 MiB, and one session retains at most 32 channels. Drain leases default to 20 messages, accept at most 100, and never return more than 1 MiB. A lease expires after 10 minutes and returns its unacknowledged messages to FIFO order. A successful acknowledgment keeps a 24-hour idempotency receipt.
 
-This is a same-user capability and product-policy boundary, not hardened authorization against the local account. Queue directories and opaque channel capabilities prevent accidental cross-channel access, and MCP mutation tools revalidate registered pane identity, but the existing Herdr UI, CLI, and full local socket API keep their normal authority for the same OS user. The bridge is therefore suitable for making Codex desktop the sole intended manual entry point, not for sandboxing a hostile local process.
+This is a same-user capability and product-policy boundary, not hardened authorization against the local account. Queue directories and opaque channel capabilities prevent accidental cross-channel access, and MCP mutation tools revalidate registered pane identity, but the existing Herdr UI, CLI, and full local socket API keep their normal authority for the same OS user. The bridge is therefore suitable for making a desktop agent the sole intended manual entry point, not for sandboxing a hostile local process.
 
 ## Schema
 

@@ -4,12 +4,16 @@
 
 mod support;
 
+#[cfg(target_os = "macos")]
 use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::FileTypeExt;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -85,8 +89,10 @@ impl Drop for SpawnedHerdr {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct RemovePath(PathBuf);
 
+#[cfg(target_os = "macos")]
 impl Drop for RemovePath {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
@@ -119,6 +125,7 @@ fn spawn_server(
     )
 }
 
+#[cfg(target_os = "macos")]
 fn spawn_named_server(
     config_home: &Path,
     state_home: &Path,

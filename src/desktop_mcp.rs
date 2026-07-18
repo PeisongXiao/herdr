@@ -1,4 +1,4 @@
-//! Private macOS-only MCP bridge used by Codex Desktop.
+//! Private MCP bridge for desktop coding agents such as Codex Desktop.
 //!
 //! This module deliberately stays on the existing local API boundary. It never
 //! starts, stops, discovers, subscribes to, or otherwise manages a Herdr server.

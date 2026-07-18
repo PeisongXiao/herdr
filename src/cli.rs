@@ -17,10 +17,10 @@ use crate::api::schema::{
 mod agent;
 mod api;
 mod completion;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 mod desktop;
 mod integration;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 mod mcp;
 mod notification;
 mod pane;
@@ -76,10 +76,15 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     };
 
     let exit_code = match command {
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         "desktop" => desktop::run_desktop_command(&args[2..])?,
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         "mcp" => mcp::run_mcp_command(&args[2..])?,
+        #[cfg(not(unix))]
+        "desktop" | "mcp" => {
+            eprintln!("herdr {command} is only supported on Unix");
+            1
+        }
         "server" => {
             let Some(exit_code) = server::run_server_command(&args[2..])? else {
                 return Ok(CommandOutcome::NotCli);

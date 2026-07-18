@@ -1,4 +1,4 @@
-#![cfg(target_os = "macos")]
+#![cfg(unix)]
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -28,8 +28,9 @@ const TOOL_NAMES: [&str; 10] = [
 fn unique_test_dir(label: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    // macOS Unix-domain socket paths are limited to 104 bytes. Keep the test
-    // root deliberately short so the nested session sockets remain portable.
+    // Unix-domain socket paths are limited to 104 bytes on macOS and 108 on
+    // Linux. Keep the test root deliberately short so the nested session
+    // sockets remain portable.
     PathBuf::from(format!("/tmp/hm-{label}-{}-{id}", std::process::id()))
 }
 

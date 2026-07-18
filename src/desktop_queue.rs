@@ -1,7 +1,8 @@
-//! Durable, capability-scoped messages from desktop-launched CLIs to Codex.
+//! Durable, capability-scoped messages from desktop-launched CLIs to MCP
+//! clients such as Codex Desktop.
 //!
-//! This module is compiled only on macOS. The enqueue path intentionally has no
-//! access to Herdr's API client or process lifecycle controls.
+//! The enqueue path intentionally has no access to Herdr's API client or
+//! process lifecycle controls.
 
 use std::collections::HashSet;
 use std::fmt;

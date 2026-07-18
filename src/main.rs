@@ -63,9 +63,9 @@ mod checksum;
 mod cli;
 mod client;
 mod config;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 mod desktop_mcp;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 mod desktop_queue;
 mod detect;
 mod events;
