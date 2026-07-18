@@ -25,6 +25,16 @@ const TOOL_NAMES: [&str; 10] = [
     "herdr_stop_cli",
 ];
 
+fn assert_text_mirrors_structured(result: &serde_json::Value) {
+    let content = result["content"].as_array().expect("tool result content");
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["type"], "text");
+    let mirrored: serde_json::Value =
+        serde_json::from_str(content[0]["text"].as_str().expect("text content"))
+            .expect("text content is JSON");
+    assert_eq!(mirrored, result["structuredContent"]);
+}
+
 fn unique_test_dir(label: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -346,7 +356,7 @@ fn stdio_server_lists_only_the_ten_tools_and_health_works_offline() {
         json!({ "name": "herdr_health", "arguments": {} }),
     );
     assert_eq!(health["result"]["isError"], false);
-    assert_eq!(health["result"]["content"], json!([]));
+    assert_text_mirrors_structured(&health["result"]);
     assert_eq!(health["result"]["structuredContent"]["ok"], true);
     let data = &health["result"]["structuredContent"]["data"];
     assert_eq!(data["queue_schema"], 1);
@@ -393,7 +403,7 @@ fn stdio_server_lists_only_the_ten_tools_and_health_works_offline() {
         json!({ "name": "herdr_snapshot", "arguments": {} }),
     );
     assert_eq!(snapshot["result"]["isError"], true);
-    assert_eq!(snapshot["result"]["content"], json!([]));
+    assert_text_mirrors_structured(&snapshot["result"]);
     assert_eq!(snapshot["result"]["structuredContent"]["ok"], false);
     assert_eq!(
         snapshot["result"]["structuredContent"]["error"]["code"],
@@ -465,7 +475,7 @@ fn live_session_launch_input_read_interrupt_and_stop_round_trip() {
         }),
     );
     assert_eq!(launched["result"]["isError"], false, "{launched}");
-    assert_eq!(launched["result"]["content"], json!([]));
+    assert_text_mirrors_structured(&launched["result"]);
     let launch_data = &launched["result"]["structuredContent"]["data"];
     let cli_id = launch_data["cli_id"]
         .as_str()
@@ -616,7 +626,7 @@ fn queued_messages_can_be_drained_and_acked_after_server_shutdown() {
             }),
         );
         assert_eq!(drained["result"]["isError"], false, "{drained}");
-        assert_eq!(drained["result"]["content"], json!([]));
+        assert_text_mirrors_structured(&drained["result"]);
         let data = &drained["result"]["structuredContent"]["data"];
         let lease_id = data["lease_id"].as_str().expect("lease id").to_string();
         if data["messages"]
@@ -759,7 +769,7 @@ fn stale_terminal_identity_is_rejected_without_sending_input() {
         sent["result"]["structuredContent"]["error"]["code"],
         "cli_identity_mismatch"
     );
-    assert_eq!(sent["result"]["content"], json!([]));
+    assert_text_mirrors_structured(&sent["result"]);
 
     let read = mcp.request(
         4,

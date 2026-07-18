@@ -102,16 +102,11 @@ fn success(data: Value) -> CallToolResult {
 }
 
 fn structured_result(value: Value, is_error: bool) -> CallToolResult {
-    let mut result = if is_error {
+    if is_error {
         CallToolResult::structured_error(value)
     } else {
         CallToolResult::structured(value)
-    };
-    // rmcp mirrors structured JSON into a text content item by default. Codex
-    // consumes structuredContent, so retaining that mirror both duplicates data
-    // and defeats the bridge's serialized response caps.
-    result.content.clear();
-    result
+    }
 }
 
 fn serialized_tool_result_len(result: &CallToolResult) -> Result<usize, BridgeError> {
@@ -1721,10 +1716,27 @@ mod tests {
         assert!(text.ends_with(" end"));
     }
 
+    fn assert_text_mirrors_structured(result: &CallToolResult) {
+        let encoded = serde_json::to_value(result).unwrap();
+        let content = encoded["content"].as_array().expect("tool result content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        let mirrored: Value =
+            serde_json::from_str(content[0]["text"].as_str().expect("text content"))
+                .expect("text content is JSON");
+        assert_eq!(
+            &mirrored,
+            result
+                .structured_content
+                .as_ref()
+                .expect("structured content")
+        );
+    }
+
     #[test]
-    fn structured_results_do_not_duplicate_json_into_content() {
+    fn structured_results_include_json_text_content() {
         let ok = success(json!({ "answer": 42 }));
-        assert!(ok.content.is_empty());
+        assert_text_mirrors_structured(&ok);
         assert_eq!(
             ok.structured_content,
             Some(json!({
@@ -1734,7 +1746,7 @@ mod tests {
         );
 
         let error = BridgeError::new("example", "failed", false).result();
-        assert!(error.content.is_empty());
+        assert_text_mirrors_structured(&error);
         assert_eq!(error.is_error, Some(true));
     }
 
@@ -1757,6 +1769,7 @@ mod tests {
             .unwrap()
             .expect("metadata fits within cap");
         assert!(serialized_tool_result_len(&bounded).unwrap() <= max_bytes);
+        assert_text_mirrors_structured(&bounded);
         let text = bounded.structured_content.unwrap()["data"]["read"]["text"]
             .as_str()
             .expect("read text")
@@ -1775,11 +1788,11 @@ mod tests {
             quarantined: 0,
         };
         let result = drain_tool_result(&drain);
-        assert!(result.content.is_empty());
+        assert_text_mirrors_structured(&result);
         let full_len = serialized_tool_result_len(&result).unwrap();
-        let data_len = serde_json::to_vec(&result.structured_content.as_ref().unwrap()["data"])
-            .unwrap()
-            .len();
-        assert!(full_len > data_len);
+        let mut structured_only = serde_json::to_value(&result).unwrap();
+        structured_only["content"] = json!([]);
+        let structured_only_len = serde_json::to_vec(&structured_only).unwrap().len();
+        assert!(full_len > structured_only_len);
     }
 }
