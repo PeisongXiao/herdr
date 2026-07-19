@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Alignment, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -16,6 +16,54 @@ use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const AGENT_PANEL_HEADER_ROWS: u16 = 3;
+
+pub(super) fn control_client_marker(app: &AppState) -> (&'static str, Color) {
+    if app.control_client_status.full_control_count > 0 {
+        ("●", app.palette.peach)
+    } else if app.control_client_status.restricted_count > 0 {
+        ("●", app.palette.green)
+    } else {
+        ("○", app.palette.overlay0)
+    }
+}
+
+fn render_control_client_marker(app: &AppState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let (dot, color) = control_client_marker(app);
+    let label = if area.width >= 5 {
+        format!("{dot} MCP")
+    } else {
+        dot.to_string()
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(label, Style::default().fg(color)))
+            .alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn render_compact_control_client_marker(app: &AppState, frame: &mut Frame, area: Rect) {
+    let content_width = area.width.saturating_sub(1);
+    if content_width == 0 || area.height == 0 {
+        return;
+    }
+
+    let toggle = collapsed_sidebar_toggle_rect(area);
+    let bottom_y = area.y + area.height.saturating_sub(1);
+    let marker_area = (area.x..area.x + content_width)
+        .find(|x| *x != toggle.x)
+        .map(|x| Rect::new(x, bottom_y, 1, 1))
+        .or_else(|| {
+            (area.height > 1).then_some(Rect::new(area.x, bottom_y.saturating_sub(1), 1, 1))
+        });
+
+    if let Some(marker_area) = marker_area {
+        render_control_client_marker(app, frame, marker_area);
+    }
+}
 
 pub(crate) struct AgentPanelEntry {
     pub ws_idx: usize,
@@ -657,6 +705,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
 
     let (ws_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
     if ws_area == Rect::default() {
+        render_compact_control_client_marker(app, frame, area);
         render_sidebar_toggle(app, frame, area, true, p);
         return;
     }
@@ -740,6 +789,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         }
     }
 
+    render_compact_control_client_marker(app, frame, area);
     render_sidebar_toggle(app, frame, area, true, p);
 }
 
@@ -981,29 +1031,43 @@ fn render_workspace_list(
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
 
-    if app.mouse_capture && list_bottom > area.y {
+    if list_bottom > area.y {
         let new_rect = app.sidebar_new_button_rect();
-        frame.render_widget(
-            Paragraph::new(Span::styled(" new", Style::default().fg(p.overlay0))),
-            new_rect,
+        let menu_rect = app.global_launcher_rect();
+        let marker_x = new_rect.x.saturating_add(new_rect.width);
+        render_control_client_marker(
+            app,
+            frame,
+            Rect::new(
+                marker_x,
+                new_rect.y,
+                menu_rect.x.saturating_sub(marker_x),
+                1,
+            ),
         );
 
-        let menu_rect = app.global_launcher_rect();
-        let menu_line = if app.global_menu_attention_badge_visible() {
-            Line::from(vec![
-                Span::styled(
-                    "● ",
-                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("menu", Style::default().fg(p.overlay0)),
-            ])
-        } else {
-            Line::from(vec![Span::styled("menu", Style::default().fg(p.overlay0))])
-        };
-        frame.render_widget(
-            Paragraph::new(menu_line).alignment(Alignment::Right),
-            menu_rect,
-        );
+        if app.mouse_capture {
+            frame.render_widget(
+                Paragraph::new(Span::styled(" new", Style::default().fg(p.overlay0))),
+                new_rect,
+            );
+
+            let menu_line = if app.global_menu_attention_badge_visible() {
+                Line::from(vec![
+                    Span::styled(
+                        "● ",
+                        Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("menu", Style::default().fg(p.overlay0)),
+                ])
+            } else {
+                Line::from(vec![Span::styled("menu", Style::default().fg(p.overlay0))])
+            };
+            frame.render_widget(
+                Paragraph::new(menu_line).alignment(Alignment::Right),
+                menu_rect,
+            );
+        }
     }
 }
 
@@ -1207,6 +1271,77 @@ mod tests {
 
         assert_eq!(toggle.x, area.x + area.width - 2);
         assert_eq!(toggle.y, area.y + area.height - 1);
+    }
+
+    #[test]
+    fn control_client_marker_reports_off_restricted_and_full_control() {
+        let mut app = crate::app::state::AppState::test_new();
+
+        assert_eq!(control_client_marker(&app), ("○", app.palette.overlay0));
+
+        app.control_client_status.restricted_count = 1;
+        assert_eq!(control_client_marker(&app), ("●", app.palette.green));
+
+        app.control_client_status.full_control_count = 1;
+        assert_eq!(control_client_marker(&app), ("●", app.palette.peach));
+    }
+
+    #[test]
+    fn control_client_marker_compacts_to_a_dot_when_the_gap_is_narrow() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.control_client_status.restricted_count = 1;
+        let mut terminal = Terminal::new(TestBackend::new(4, 1)).unwrap();
+
+        terminal
+            .draw(|frame| render_control_client_marker(&app, frame, Rect::new(0, 0, 4, 1)))
+            .unwrap();
+
+        let row = (0..4)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect::<String>();
+        assert!(row.contains('●'));
+        assert!(!row.contains("MCP"));
+    }
+
+    #[test]
+    fn sidebar_shows_control_client_marker_without_mouse_capture() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.mouse_capture = false;
+        app.control_client_status.restricted_count = 1;
+        let area = Rect::new(0, 0, 26, 20);
+        app.view.sidebar_rect = area;
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let footer = app.sidebar_footer_rect();
+        let row = (footer.x..footer.x + footer.width)
+            .map(|x| terminal.backend().buffer()[(x, footer.y)].symbol())
+            .collect::<String>();
+        assert!(row.contains("● MCP"));
+    }
+
+    #[test]
+    fn collapsed_sidebar_shows_dot_without_covering_toggle() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.control_client_status.restricted_count = 1;
+        let area = Rect::new(0, 0, 4, 20);
+        let mut terminal = Terminal::new(TestBackend::new(4, 20)).unwrap();
+
+        terminal
+            .draw(|frame| render_sidebar_collapsed(&app, frame, area))
+            .unwrap();
+
+        let toggle = collapsed_sidebar_toggle_rect(area);
+        assert_eq!(
+            terminal.backend().buffer()[(toggle.x, toggle.y)].symbol(),
+            "»"
+        );
+        let marker = &terminal.backend().buffer()[(area.x, toggle.y)];
+        assert_eq!(marker.symbol(), "●");
+        assert_eq!(marker.style().fg, Some(app.palette.green));
     }
 
     #[test]

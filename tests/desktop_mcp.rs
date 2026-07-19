@@ -25,6 +25,20 @@ const TOOL_NAMES: [&str; 10] = [
     "herdr_stop_cli",
 ];
 
+const FULL_CONTROL_TOOL_NAMES: [&str; 11] = [
+    "herdr_agent_control",
+    "herdr_destructive_action",
+    "herdr_inspect",
+    "herdr_layout_control",
+    "herdr_pane_control",
+    "herdr_peer_control",
+    "herdr_recovery_control",
+    "herdr_tab_control",
+    "herdr_wait",
+    "herdr_workspace_control",
+    "herdr_worktree_control",
+];
+
 fn assert_text_mirrors_structured(result: &serde_json::Value) {
     let content = result["content"].as_array().expect("tool result content");
     assert_eq!(content.len(), 1);
@@ -60,8 +74,20 @@ impl McpChild {
     }
 
     fn spawn_for(base: &std::path::Path, session: &str) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_herdr"))
-            .args(["--session", session, "mcp", "serve"])
+        Self::spawn_for_mode(base, session, false)
+    }
+
+    fn spawn_full_control_for(base: &std::path::Path, session: &str) -> Self {
+        Self::spawn_for_mode(base, session, true)
+    }
+
+    fn spawn_for_mode(base: &std::path::Path, session: &str, full_control: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+        command.args(["--session", session, "mcp", "serve"]);
+        if full_control {
+            command.arg("--full-control");
+        }
+        let mut child = command
             .env("XDG_CONFIG_HOME", base.join("config"))
             .env("XDG_STATE_HOME", base.join("state"))
             .env_remove("HERDR_SOCKET_PATH")
@@ -147,6 +173,18 @@ impl McpChild {
         let response = self.receive();
         assert_eq!(response["id"], id);
         response
+    }
+
+    fn listed_tool_names(&mut self, request_id: u64) -> Vec<String> {
+        let listed = self.request(request_id, "tools/list", json!({}));
+        let mut names = listed["result"]["tools"]
+            .as_array()
+            .expect("tools/list array")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name").to_string())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names
     }
 
     fn close_and_wait(mut self) {
@@ -361,6 +399,7 @@ fn stdio_server_lists_only_the_ten_tools_and_health_works_offline() {
     let data = &health["result"]["structuredContent"]["data"];
     assert_eq!(data["queue_schema"], 1);
     assert_eq!(data["required_protocol"], 17);
+    assert_eq!(data["access_mode"], "restricted");
     assert_eq!(data["herdr_available"], false);
 
     let invalid = mcp.request(
@@ -442,6 +481,103 @@ fn stdio_server_lists_only_the_ten_tools_and_health_works_offline() {
     );
     assert_eq!(malformed_cli_id["error"]["code"], -32602);
     mcp.close_and_wait();
+}
+
+#[test]
+fn full_control_is_opt_in_and_presence_tracks_mixed_bridges() {
+    let server = SessionServer::start();
+    let mut restricted = McpChild::spawn_for(&server.base, &server.session);
+    restricted.initialize();
+
+    assert_eq!(
+        restricted.listed_tool_names(2),
+        TOOL_NAMES.map(str::to_string).to_vec()
+    );
+    let denied = restricted.request(
+        3,
+        "tools/call",
+        json!({
+            "name": "herdr_inspect",
+            "arguments": { "action": "workspace_list", "params": {} },
+        }),
+    );
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert_eq!(
+        denied["result"]["structuredContent"]["error"]["code"],
+        "full_control_required"
+    );
+
+    let mut full = McpChild::spawn_full_control_for(&server.base, &server.session);
+    full.initialize();
+    let mut expected = TOOL_NAMES.map(str::to_string).to_vec();
+    expected.extend(FULL_CONTROL_TOOL_NAMES.map(str::to_string));
+    expected.sort_unstable();
+    assert_eq!(full.listed_tool_names(2), expected);
+
+    let health = full.request(
+        3,
+        "tools/call",
+        json!({ "name": "herdr_health", "arguments": {} }),
+    );
+    assert_eq!(
+        health["result"]["structuredContent"]["data"]["access_mode"],
+        "full_control"
+    );
+
+    let mut mixed_observed = false;
+    for request_id in 4..24 {
+        let snapshot = restricted.request(
+            request_id,
+            "tools/call",
+            json!({ "name": "herdr_snapshot", "arguments": {} }),
+        );
+        let status =
+            &snapshot["result"]["structuredContent"]["data"]["snapshot"]["control_clients"];
+        if status["total_count"] == 2
+            && status["restricted_count"] == 1
+            && status["full_control_count"] == 1
+        {
+            mixed_observed = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(mixed_observed, "mixed MCP presence was not published");
+
+    let inspected = full.request(
+        24,
+        "tools/call",
+        json!({
+            "name": "herdr_inspect",
+            "arguments": { "action": "workspace_list", "params": {} },
+        }),
+    );
+    assert_eq!(inspected["result"]["isError"], false, "{inspected}");
+
+    full.close_and_wait();
+    let mut restricted_only_observed = false;
+    for request_id in 25..45 {
+        let snapshot = restricted.request(
+            request_id,
+            "tools/call",
+            json!({ "name": "herdr_snapshot", "arguments": {} }),
+        );
+        let status =
+            &snapshot["result"]["structuredContent"]["data"]["snapshot"]["control_clients"];
+        if status["total_count"] == 1
+            && status["restricted_count"] == 1
+            && status["full_control_count"] == 0
+        {
+            restricted_only_observed = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        restricted_only_observed,
+        "full-control disconnect was not published"
+    );
+    restricted.close_and_wait();
 }
 
 #[test]

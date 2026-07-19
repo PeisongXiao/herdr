@@ -213,6 +213,7 @@ impl App {
         changed |= self.expire_incoming_peer_leases(now);
         changed |= self.expire_remote_owner_leases(now);
         changed |= self.expire_remote_presentations(now);
+        changed |= self.expire_control_client_leases(now);
         #[cfg(unix)]
         {
             changed |= self.expire_remote_restore_queue(now);

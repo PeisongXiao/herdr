@@ -1355,6 +1355,9 @@ pub struct AppState {
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     pub peers: std::collections::HashMap<String, crate::api::schema::PeerInfo>,
+    /// Aggregate runtime presence for invisible control clients such as MCP bridges.
+    /// This projection is intentionally excluded from persisted session snapshots.
+    pub control_client_status: crate::api::schema::ControlClientStatus,
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
     pub(crate) delegated_terminal_ids:
@@ -1722,6 +1725,7 @@ impl AppState {
         Self {
             terminals: std::collections::HashMap::new(),
             peers: std::collections::HashMap::new(),
+            control_client_status: crate::api::schema::ControlClientStatus::default(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             delegated_terminal_ids: std::collections::HashMap::new(),
             pane_id_aliases: std::collections::HashMap::new(),

@@ -105,6 +105,8 @@ pub(crate) struct PendingOwnerActivation {
     pub(crate) cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+mod control_clients;
+
 pub struct App {
     pub state: AppState,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
@@ -129,6 +131,7 @@ pub struct App {
     pub(crate) remote_presentations: remote_presentations::RemotePresentationState,
     pub(crate) next_peer_refresh_generation: u64,
     pub(crate) remote_api_jobs_in_flight: usize,
+    pub(crate) control_clients: control_clients::ControlClientRegistry,
     #[cfg(unix)]
     pub(crate) remote_restore_workers: HashMap<String, remote_resume::RemoteRestoreWorker>,
     #[cfg(unix)]
@@ -561,6 +564,7 @@ impl App {
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
             peers: std::collections::HashMap::new(),
+            control_client_status: crate::api::schema::ControlClientStatus::default(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             delegated_terminal_ids: std::collections::HashMap::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -777,6 +781,7 @@ impl App {
             remote_presentations: remote_presentations::RemotePresentationState::default(),
             next_peer_refresh_generation: 1,
             remote_api_jobs_in_flight: 0,
+            control_clients: control_clients::ControlClientRegistry::default(),
             #[cfg(unix)]
             remote_restore_workers: HashMap::new(),
             #[cfg(unix)]

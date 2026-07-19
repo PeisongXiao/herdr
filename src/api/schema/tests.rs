@@ -729,6 +729,7 @@ fn session_snapshot_request_and_response_round_trip() {
         id: "req_snapshot".into(),
         result: ResponseResult::SessionSnapshot {
             snapshot: Box::new(SessionSnapshot {
+                control_clients: ControlClientStatus::default(),
                 version: "0.1.2".into(),
                 protocol: 16,
                 focused_workspace_id: None,

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::agents::AgentInfo;
+use super::control_clients::ControlClientStatus;
 use super::panes::{PaneInfo, PaneLayoutSnapshot};
 use super::tabs::TabInfo;
 use super::workspaces::WorkspaceInfo;
@@ -9,6 +10,8 @@ use super::workspaces::WorkspaceInfo;
 pub struct SessionSnapshot {
     pub version: String,
     pub protocol: u32,
+    #[serde(default)]
+    pub control_clients: ControlClientStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused_workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

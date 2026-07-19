@@ -200,6 +200,12 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::LayoutUpdated,
                 last_sequence: 0,
             })),
+            Subscription::ControlClientPresenceChanged {} => {
+                Ok(Self::Event(ActiveEventSubscription {
+                    event_kind: crate::api::schema::EventKind::ControlClientPresenceChanged,
+                    last_sequence: 0,
+                }))
+            }
             Subscription::PaneOutputMatched {
                 pane_id,
                 source,

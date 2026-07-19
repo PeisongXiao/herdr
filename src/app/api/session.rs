@@ -45,6 +45,7 @@ impl App {
         SessionSnapshot {
             version: crate::build_info::version(),
             protocol: crate::protocol::PROTOCOL_VERSION,
+            control_clients: self.state.control_client_status,
             focused_workspace_id,
             focused_tab_id,
             focused_pane_id,

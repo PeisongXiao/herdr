@@ -2,6 +2,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 mod agents;
+mod control_clients;
 pub(crate) mod env;
 mod integrations;
 mod layouts;
@@ -1367,6 +1368,16 @@ impl App {
                 );
             }
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
+            Method::ControlClientRegister(params) => {
+                return self.handle_control_client_register(request.id, params)
+            }
+            Method::ControlClientHeartbeat(target) => {
+                return self.handle_control_client_heartbeat(request.id, target)
+            }
+            Method::ControlClientUnregister(target) => {
+                return self.handle_control_client_unregister(request.id, target)
+            }
+            Method::ControlClientStatus(_) => return self.handle_control_client_status(request.id),
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
             Method::WorkspaceCreate(params) => {

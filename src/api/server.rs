@@ -499,6 +499,10 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::ClientWindowTitleSet(_) => "client.window_title.set",
         Method::ClientWindowTitleClear(_) => "client.window_title.clear",
         Method::SessionSnapshot(_) => "session.snapshot",
+        Method::ControlClientRegister(_) => "control_client.register",
+        Method::ControlClientHeartbeat(_) => "control_client.heartbeat",
+        Method::ControlClientUnregister(_) => "control_client.unregister",
+        Method::ControlClientStatus(_) => "control_client.status",
         Method::WorkspaceCreate(_) => "workspace.create",
         Method::WorkspaceList(_) => "workspace.list",
         Method::WorkspaceGet(_) => "workspace.get",
@@ -1174,6 +1178,10 @@ mod tests {
             r#"{"id":"peer_disconnect","method":"peer.disconnect_ssh","params":{"peer_id":"peer","connection_id":"connection"}}"#,
             r#"{"id":"peer_keepalive","method":"peer.keepalive_ssh","params":{"peer_id":"peer","connection_id":"connection"}}"#,
             r#"{"id":"workspace_list","method":"workspace.list","params":{}}"#,
+            r#"{"id":"control_register","method":"control_client.register","params":{"client_id":"mcp","kind":"mcp","access_mode":"restricted"}}"#,
+            r#"{"id":"control_heartbeat","method":"control_client.heartbeat","params":{"client_id":"mcp"}}"#,
+            r#"{"id":"control_unregister","method":"control_client.unregister","params":{"client_id":"mcp"}}"#,
+            r#"{"id":"control_status","method":"control_client.status","params":{}}"#,
         ] {
             assert_peer_method_not_allowed(serde_json::from_str(request).unwrap());
         }

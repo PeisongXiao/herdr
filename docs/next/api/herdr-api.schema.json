@@ -79,6 +79,31 @@
           ],
           "type": "string"
         },
+        "ControlClientStatus": {
+          "properties": {
+            "full_control_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "restricted_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "total_count",
+            "restricted_count",
+            "full_control_count"
+          ],
+          "type": "object"
+        },
         "EventData": {
           "oneOf": [
             {
@@ -652,6 +677,22 @@
                 "layout"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "status": {
+                  "$ref": "#/schemas/event/$defs/ControlClientStatus"
+                },
+                "type": {
+                  "const": "control_client_presence_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "status"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -679,7 +720,8 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "control_client_presence_changed"
           ],
           "type": "string"
         },
@@ -1362,6 +1404,51 @@
           },
           "required": [
             "title"
+          ],
+          "type": "object"
+        },
+        "ControlClientAccessMode": {
+          "enum": [
+            "restricted",
+            "full_control"
+          ],
+          "type": "string"
+        },
+        "ControlClientKind": {
+          "enum": [
+            "mcp"
+          ],
+          "type": "string"
+        },
+        "ControlClientRegisterParams": {
+          "additionalProperties": false,
+          "properties": {
+            "access_mode": {
+              "$ref": "#/schemas/request/$defs/ControlClientAccessMode"
+            },
+            "client_id": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/request/$defs/ControlClientKind"
+            }
+          },
+          "required": [
+            "client_id",
+            "kind",
+            "access_mode"
+          ],
+          "type": "object"
+        },
+        "ControlClientTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "client_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "client_id"
           ],
           "type": "object"
         },
@@ -3742,6 +3829,18 @@
                 "type"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "control_client.presence_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -4491,6 +4590,70 @@
           "properties": {
             "method": {
               "const": "session.snapshot",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "control_client.register",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ControlClientRegisterParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "control_client.heartbeat",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ControlClientTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "control_client.unregister",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ControlClientTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "control_client.status",
               "type": "string"
             },
             "params": {
@@ -6833,6 +6996,31 @@
           ],
           "type": "string"
         },
+        "ControlClientStatus": {
+          "properties": {
+            "full_control_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "restricted_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "total_count",
+            "restricted_count",
+            "full_control_count"
+          ],
+          "type": "object"
+        },
         "EventData": {
           "oneOf": [
             {
@@ -7406,6 +7594,22 @@
                 "layout"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "status": {
+                  "$ref": "#/schemas/success_response/$defs/ControlClientStatus"
+                },
+                "type": {
+                  "const": "control_client_presence_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "status"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -7448,7 +7652,8 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "control_client_presence_changed"
           ],
           "type": "string"
         },
@@ -9096,6 +9301,22 @@
             },
             {
               "properties": {
+                "status": {
+                  "$ref": "#/schemas/success_response/$defs/ControlClientStatus"
+                },
+                "type": {
+                  "const": "control_client_status",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "workspace_info",
                   "type": "string"
@@ -10314,6 +10535,14 @@
                 "$ref": "#/schemas/success_response/$defs/AgentInfo"
               },
               "type": "array"
+            },
+            "control_clients": {
+              "$ref": "#/schemas/success_response/$defs/ControlClientStatus",
+              "default": {
+                "full_control_count": 0,
+                "restricted_count": 0,
+                "total_count": 0
+              }
             },
             "focused_pane_id": {
               "type": [

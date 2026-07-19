@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::agents::{AgentAttachInfo, AgentInfo};
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
+use super::control_clients::ControlClientStatus;
 use super::events::EventEnvelope;
 use super::integrations::{
     IntegrationInstallResult, IntegrationTarget, IntegrationUninstallResult,
@@ -55,6 +56,9 @@ pub enum ResponseResult {
     },
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,
+    },
+    ControlClientStatus {
+        status: ControlClientStatus,
     },
     WorkspaceInfo {
         workspace: WorkspaceInfo,

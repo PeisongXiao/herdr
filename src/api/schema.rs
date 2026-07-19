@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod agents;
 pub mod common;
+pub mod control_clients;
 pub mod events;
 pub mod integrations;
 pub mod panes;
@@ -16,6 +17,7 @@ pub mod worktrees;
 
 pub use agents::*;
 pub use common::*;
+pub use control_clients::*;
 pub use events::*;
 pub use integrations::*;
 pub use panes::*;
@@ -65,6 +67,14 @@ pub enum Method {
     ClientWindowTitleClear(EmptyParams),
     #[serde(rename = "session.snapshot")]
     SessionSnapshot(EmptyParams),
+    #[serde(rename = "control_client.register")]
+    ControlClientRegister(ControlClientRegisterParams),
+    #[serde(rename = "control_client.heartbeat")]
+    ControlClientHeartbeat(ControlClientTarget),
+    #[serde(rename = "control_client.unregister")]
+    ControlClientUnregister(ControlClientTarget),
+    #[serde(rename = "control_client.status")]
+    ControlClientStatus(EmptyParams),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.list")]

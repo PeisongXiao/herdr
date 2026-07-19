@@ -7,9 +7,9 @@ use ratatui::{
 };
 
 use super::sidebar::{
-    agent_panel_entries, agent_panel_entries_from, grouped_child_display_label,
-    next_entry_is_indented_workspace, workspace_list_entries_expanded, AgentPanelEntry,
-    WorkspaceListEntry,
+    agent_panel_entries, agent_panel_entries_from, control_client_marker,
+    grouped_child_display_label, next_entry_is_indented_workspace, workspace_list_entries_expanded,
+    AgentPanelEntry, WorkspaceListEntry,
 };
 use super::status::{agent_icon, state_dot};
 use super::text::{display_width_u16, truncate_end};
@@ -212,6 +212,13 @@ pub(crate) fn render_mobile_header(
     let status = Rect::new(area.x, area.y, status_w, area.height);
 
     render_header_status(app, terminal_runtimes, frame, status);
+    if switch.x > area.x {
+        let (dot, color) = control_client_marker(app);
+        frame.render_widget(
+            Paragraph::new(Span::styled(dot, Style::default().fg(color).bg(p.panel_bg))),
+            Rect::new(switch.x - 1, area.y, 1, 1),
+        );
+    }
     render_switch_button(app, frame, switch);
 }
 
@@ -1454,5 +1461,26 @@ mod tests {
             !row.contains("issue-264-nix-support"),
             "header row: {row:?}"
         );
+    }
+
+    #[test]
+    fn mobile_header_shows_full_control_marker_without_changing_switch_hit_area() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.control_client_status.restricted_count = 1;
+        app.control_client_status.full_control_count = 1;
+        let area = Rect::new(0, 0, 40, 2);
+        let switch = compute_mobile_header_hit_areas(&app, area).menu;
+        app.view.mobile_menu_hit_area = switch;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 2)).unwrap();
+
+        terminal
+            .draw(|frame| render_mobile_header(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let marker = &terminal.backend().buffer()[(switch.x - 1, area.y)];
+        assert_eq!(marker.symbol(), "●");
+        assert_eq!(marker.style().fg, Some(app.palette.peach));
+        assert_eq!(app.view.mobile_menu_hit_area, switch);
     }
 }
