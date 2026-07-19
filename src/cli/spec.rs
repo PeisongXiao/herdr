@@ -51,6 +51,7 @@ pub(super) fn command() -> Command {
             .subcommand(wait_command())
             .subcommand(terminal_command())
             .subcommand(session_command())
+            .subcommand(mcp_command())
             .subcommand(integration_command())
             .subcommand(plugin_command());
     disable_auto_help(command)
@@ -685,6 +686,27 @@ fn integration_command() -> Command {
         )
 }
 
+fn mcp_command() -> Command {
+    Command::new("mcp")
+        .about("Configure Herdr as an MCP server for coding clients")
+        .subcommand(
+            Command::new("install")
+                .about("Install Herdr in an MCP client")
+                .arg(required("client", "CLIENT"))
+                .arg(flag("full-control").help("Grant human-equivalent Herdr control")),
+        )
+        .subcommand(
+            Command::new("status")
+                .about("Show Herdr MCP client configuration status")
+                .arg(Arg::new("client").value_name("CLIENT")),
+        )
+        .subcommand(
+            Command::new("uninstall")
+                .about("Remove Herdr from an MCP client")
+                .arg(required("client", "CLIENT")),
+        )
+}
+
 fn plugin_command() -> Command {
     Command::new("plugin")
         .about("Install and run workflow plugins")
@@ -1033,6 +1055,28 @@ mod tests {
         assert!(!agent
             .get_subcommands()
             .any(|subcommand| subcommand.get_name() == "shell"));
+    }
+
+    #[test]
+    fn spec_exposes_mcp_management_but_keeps_bridge_serve_hidden() {
+        let cmd = super::command();
+        let mcp = command_path(&cmd, &["mcp"]);
+        assert!(mcp
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == "install"));
+        assert!(mcp
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == "status"));
+        assert!(mcp
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == "uninstall"));
+        assert!(!mcp
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == "serve"));
+        assert!(has_option(
+            command_path(&cmd, &["mcp", "install"]),
+            "full-control"
+        ));
     }
 
     #[test]

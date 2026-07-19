@@ -359,6 +359,45 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 
 Use `wait output` for normal commands and servers. Use `wait agent-status` for coding agents.
 
+## MCP clients
+
+Configure a supported MCP client with a fixed `herdr` server entry:
+
+```bash
+herdr mcp install codex
+herdr mcp install claude
+herdr mcp install hermes
+herdr mcp install openclaw
+herdr mcp install codex --full-control
+herdr mcp status
+herdr mcp status codex
+herdr mcp uninstall codex
+```
+
+Supported client IDs are `codex`, `claude` (with `claude-code` as an alias),
+`hermes`, and `openclaw`. `mcp install` defaults to the restricted tool set.
+Use `--full-control` only when the client should have the same interaction
+surface as a person at the Herdr UI. `mcp status [client]` inspects configured
+entries, and `mcp uninstall <client>` removes only the fixed `herdr` entry.
+
+To bind the installed server to a named Herdr session, select it when
+installing:
+
+```bash
+herdr --session work mcp install codex
+```
+
+The generated entry carries the selected `HERDR_SESSION`, so all MCP tools
+target that session namespace. Installation only changes client configuration:
+it does not start an MCP connection. Restart or reload the client after a
+change. The sidebar indicator stays gray until the client starts the configured
+stdio bridge, then turns green while at least one connection is active.
+
+OpenCode and unrecognized client IDs exit with `Currently unsupported`. Use the
+manual `herdr mcp serve [--full-control]` setup in the
+[MCP bridge documentation](/docs/socket-api/#mcp-bridge) when automatic setup
+is unavailable.
+
 ## Integrations
 
 ```bash

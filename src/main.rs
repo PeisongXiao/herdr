@@ -77,6 +77,8 @@ mod ipc;
 mod kitty_graphics;
 mod layout;
 mod logging;
+#[cfg(unix)]
+mod mcp_install;
 mod pane;
 mod persist;
 mod platform;
@@ -579,6 +581,9 @@ fn main() -> io::Result<()> {
         println!("       herdr pane <subcommand> ...");
         println!("       herdr wait <subcommand> ...");
         println!("       herdr session <subcommand> ...");
+        println!("       herdr mcp install <client> [--full-control]");
+        println!("       herdr mcp status [client]");
+        println!("       herdr mcp uninstall <client>");
         println!("       herdr integration <subcommand> ...");
         println!();
         println!("Common commands:");

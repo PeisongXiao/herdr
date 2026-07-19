@@ -1051,9 +1051,31 @@ fn hidden_commands_stay_out_of_root_help_and_completions() {
         .expect("run root help");
     assert!(help.status.success());
     let help = String::from_utf8_lossy(&help.stdout);
-    assert!(!help.contains("herdr mcp"));
+    for command in [
+        "herdr mcp install <client> [--full-control]",
+        "herdr mcp status [client]",
+        "herdr mcp uninstall <client>",
+    ] {
+        assert!(help.contains(command));
+    }
+    assert!(!help.contains("herdr mcp serve"));
     assert!(!help.contains("herdr desktop"));
     assert!(!help.contains("enqueue"));
+
+    let mcp_help = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["mcp", "--help"])
+        .output()
+        .expect("run MCP help");
+    assert!(mcp_help.status.success());
+    let mcp_help = format!(
+        "{}{}",
+        String::from_utf8_lossy(&mcp_help.stdout),
+        String::from_utf8_lossy(&mcp_help.stderr)
+    );
+    for command in ["install", "status", "uninstall"] {
+        assert!(mcp_help.contains(&format!("mcp {command}")));
+    }
+    assert!(!mcp_help.contains("mcp serve"));
 
     let completion = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .args(["completion", "zsh"])
@@ -1061,7 +1083,10 @@ fn hidden_commands_stay_out_of_root_help_and_completions() {
         .expect("generate zsh completion");
     assert!(completion.status.success());
     let completion = String::from_utf8_lossy(&completion.stdout);
-    assert!(!completion.contains("mcp"));
+    for command in ["mcp", "install", "status", "uninstall"] {
+        assert!(completion.contains(&format!("'{command}:")));
+    }
+    assert!(!completion.contains("'serve:"));
     assert!(!completion.contains("desktop"));
     assert!(!completion.contains("enqueue"));
 }

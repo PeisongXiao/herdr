@@ -19,6 +19,22 @@ The layers share the same control surface.
 
 ## Desktop MCP bridge
 
+For supported clients, prefer automatic setup:
+
+```bash
+herdr mcp install codex
+herdr mcp status codex
+herdr mcp uninstall codex
+```
+
+The installer supports Codex, Claude Code, Hermes, and OpenClaw. It writes the
+fixed `herdr` entry in restricted mode unless `--full-control` is explicit.
+OpenCode and other client IDs report `Currently unsupported`; use the manual
+configuration below for them. Installing an entry does not create a connection
+or turn the MCP indicator green. That happens only when a client starts the
+configured stdio bridge.
+
+
 On macOS and Linux, any MCP-capable coding agent can start Herdr's local STDIO MCP bridge as a child process. The bridge controls a selected Herdr session but never appears as a Herdr session, pane, or agent itself. Both entry points are intentionally hidden from Herdr help, completions, menus, and integration lists: `herdr --session NAME mcp serve` runs the bridge, while a CLI launched by that bridge can use `herdr desktop enqueue` to append a message for later desktop inspection. The client still shows the configured MCP server in its own settings UI.
 
 Register the bridge with your agent's MCP configuration, using the absolute path to the Herdr binary. For Codex desktop, edit the shared Codex configuration:

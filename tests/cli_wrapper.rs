@@ -4407,3 +4407,46 @@ fn wait_agent_status_exits_when_done_status_matches() {
 
     cleanup_spawned_herdr(herdr, base);
 }
+
+#[test]
+fn mcp_cli_help_lists_client_setup_commands_and_hides_serve() {
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["mcp", "--help"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let help = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for command in ["install", "status", "uninstall"] {
+        assert!(help.contains(command), "MCP help omitted {command}: {help}");
+    }
+    assert!(
+        !help.contains("serve"),
+        "MCP help exposed the intentionally hidden serve command: {help}"
+    );
+}
+
+#[test]
+fn mcp_cli_reports_unsupported_clients_without_side_effects() {
+    for client in ["opencode", "unknown-client"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+            .args(["mcp", "install", client])
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(2));
+        let message = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            message.contains("Currently unsupported"),
+            "unexpected unsupported-client response for {client}: {message}"
+        );
+    }
+}

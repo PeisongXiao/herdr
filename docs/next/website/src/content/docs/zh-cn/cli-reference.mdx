@@ -319,6 +319,42 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 
 普通命令和服务器用 `wait output`。编程智能体用 `wait agent-status`。
 
+## MCP 客户端
+
+在受支持的 MCP 客户端用户配置中写入固定名称为 `herdr` 的服务器条目:
+
+```bash
+herdr mcp install codex
+herdr mcp install claude
+herdr mcp install hermes
+herdr mcp install openclaw
+herdr mcp install codex --full-control
+herdr mcp status
+herdr mcp status codex
+herdr mcp uninstall codex
+```
+
+支持的客户端 ID 为 `codex`、`claude`（别名 `claude-code`）、`hermes` 和
+`openclaw`。`mcp install` 默认配置受限工具集。只有在客户端需要与 Herdr UI
+中的用户相同的操作范围时才使用 `--full-control`。`mcp status [client]`
+检查已配置的条目，`mcp uninstall <client>` 只删除固定名称为 `herdr` 的条目。
+
+若要把安装的服务器固定到命名 Herdr 会话，请在安装时选择该会话:
+
+```bash
+herdr --session work mcp install codex
+```
+
+生成的条目会保存所选的 `HERDR_SESSION`，因此所有 MCP 工具都以该会话的
+命名空间为目标。安装只修改客户端配置，并不会建立 MCP 连接。更改后请重启或
+重新加载客户端。侧边栏指示器会保持灰色，直到客户端启动已配置的 stdio 桥；
+至少有一个连接处于活动状态时才会变为绿色。
+
+OpenCode 和无法识别的客户端 ID 会输出 `Currently unsupported` 并退出。
+自动设置不可用时，请使用
+[MCP 桥文档](/docs/zh-cn/socket-api/#mcp-bridge) 中的
+`herdr mcp serve [--full-control]` 手动设置。
+
 ## 集成
 
 ```bash

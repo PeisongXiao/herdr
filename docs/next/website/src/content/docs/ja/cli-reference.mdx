@@ -319,6 +319,47 @@ herdr wait agent-status <pane_id> --status <idle|working|blocked|done|unknown> [
 
 通常のコマンドやサーバーには `wait output` を使います。コーディングエージェントには `wait agent-status` を使います。
 
+## MCP クライアント
+
+対応する MCP クライアントのユーザー設定に、固定名 `herdr` のサーバーエントリを設定します。
+
+```bash
+herdr mcp install codex
+herdr mcp install claude
+herdr mcp install hermes
+herdr mcp install openclaw
+herdr mcp install codex --full-control
+herdr mcp status
+herdr mcp status codex
+herdr mcp uninstall codex
+```
+
+対応するクライアント ID は `codex`、`claude`（別名 `claude-code`）、
+`hermes`、`openclaw` です。`mcp install` は既定で制限付きツールセットを
+設定します。Herdr UI を操作する人と同じ操作範囲が必要な場合だけ
+`--full-control` を指定してください。`mcp status [client]` は設定済み
+エントリを確認し、`mcp uninstall <client>` は固定名 `herdr` のエントリ
+だけを削除します。
+
+インストールするサーバーを名前付き Herdr セッションに固定するには、
+インストール時にそのセッションを選択します。
+
+```bash
+herdr --session work mcp install codex
+```
+
+生成されるエントリには選択した `HERDR_SESSION` が保持されるため、すべての
+MCP ツールはそのセッションの名前空間を対象にします。インストールは
+クライアント設定を変更するだけで、MCP 接続は開始しません。変更後は
+クライアントを再起動または再読み込みしてください。サイドバーの表示は、
+クライアントが設定済みの stdio ブリッジを開始するまでは灰色で、1 つ以上の
+接続が有効な間だけ緑色になります。
+
+OpenCode と未認識のクライアント ID は `Currently unsupported` を表示して
+終了します。自動セットアップを利用できない場合は、
+[MCP ブリッジのドキュメント](/docs/ja/socket-api/#mcp-bridge) にある
+`herdr mcp serve [--full-control]` の手動設定を使用してください。
+
 ## インテグレーション
 
 ```bash
