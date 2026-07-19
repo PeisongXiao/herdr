@@ -211,6 +211,8 @@ pub enum Method {
     PeerDisconnectSsh(PeerDisconnectSshParams),
     #[serde(rename = "peer.keepalive_ssh")]
     PeerKeepaliveSsh(PeerKeepaliveSshParams),
+    #[serde(rename = "remote.resume")]
+    RemoteResume(RemoteResumeParams),
     #[serde(rename = "peer.presentation.activate")]
     PeerPresentationActivate(TerminalDelegationClaim),
     #[serde(rename = "peer.unregister")]

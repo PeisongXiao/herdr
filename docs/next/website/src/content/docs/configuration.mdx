@@ -116,6 +116,7 @@ Remote attach manages its SSH connection with a temporary keepalive and connecti
 [remote]
 manage_ssh_config = true
 ssh_integration = true
+auto_remote_handoff = false
 ```
 
 When enabled, `herdr --remote` writes a private temporary SSH config that includes your `~/.ssh/config` and `/etc/ssh/ssh_config` first, then adds fallback `ServerAliveInterval` and `ServerAliveCountMax` values. Your own keepalive settings win. Herdr also uses a private per-attach OpenSSH control socket to reuse the first authenticated connection. Set `manage_ssh_config = false` to run remote attach through plain `ssh` without Herdr's generated config or control socket.
@@ -125,6 +126,8 @@ On Unix, `ssh_integration` puts a small `ssh` shim first on each Herdr pane's `P
 For newly created macOS login-zsh panes, including the default `shell_mode = "auto"` path, Herdr uses a private one-shot startup hook. It restores the user's original `ZDOTDIR` and startup files, then re-prepends the shim and runs `rehash` at the first prompt after `path_helper` and other login setup have finished. The hook removes itself after that prompt. User aliases and functions still take their normal precedence, and an explicit absolute path such as `/usr/bin/ssh` bypasses the shim. Existing panes keep their current environment until they are recreated.
 
 This setting is independent of `manage_ssh_config`: pane SSH integration always uses its own temporary OpenSSH control connection when an interactive terminal is available, while `manage_ssh_config` controls only `herdr --remote`. Set `ssh_integration = false` to leave pane `ssh` untouched, or use `HERDR_SSH_BYPASS=1 ssh TARGET` for one command. See [Persistence and remote access](/docs/persistence-remote/) for supported forms, remote Herdr discovery, and peer-link behavior.
+
+With `auto_remote_handoff = true`, a graceful server stop hands every delegated remote pane back to its host instead of terminating it, and the next server start re-acquires the pane into the workspace and tab it came from. Automatic re-acquire is non-interactive, so it needs key- or agent-based SSH authentication; hosts that require a password or MFA stay recorded and can be resumed with `herdr remote-resume`. Ungraceful stops (crash, power loss, network failure) still terminate remote panes, and nested SSH chains deeper than one hop are not handed off. See [Persistence and remote access](/docs/persistence-remote/#automatic-handoff-on-server-stop) for the full lifecycle.
 
 ## Keybindings
 

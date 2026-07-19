@@ -89,6 +89,8 @@ mod raw_input;
 mod release_notes;
 mod remote;
 mod remote_agent;
+#[cfg(unix)]
+mod remote_resume;
 mod render_prof;
 mod selection;
 mod server;
@@ -358,6 +360,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # remote host's Herdr server instead of opening a raw SSH shell. Unsupported
 # ssh forms fall through to the real ssh binary.
 # ssh_integration = true
+
+# On graceful server stop, hand delegated remote panes back to their hosts so
+# they keep running, and re-acquire them when the server starts again.
+# Re-acquire is non-interactive, so it needs key- or agent-based SSH auth;
+# password or MFA hosts can be resumed manually with `herdr remote-resume`.
+# auto_remote_handoff = false
 
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.

@@ -2536,6 +2536,8 @@ impl AppState {
             | AppEvent::RemoteAgentStartFinished(_)
             | AppEvent::PeerAgentRequestFinished(_)
             | AppEvent::PeerHealthRequestFinished(_) => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::RemoteReacquireFinished(_) => Vec::new(),
             AppEvent::StateChanged {
                 pane_id,
                 agent,

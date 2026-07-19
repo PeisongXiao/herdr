@@ -480,7 +480,7 @@ impl App {
         }
     }
 
-    fn spawn_agent_workspace(
+    pub(super) fn spawn_agent_workspace(
         &mut self,
         cwd: PathBuf,
         rows: u16,
@@ -517,7 +517,7 @@ impl App {
         Ok((ws_idx, 0, pane_id))
     }
 
-    fn spawn_agent_split(
+    pub(super) fn spawn_agent_split(
         &mut self,
         ws_idx: usize,
         target_pane: crate::layout::PaneId,
@@ -644,6 +644,7 @@ impl App {
     }
 }
 
+#[derive(Debug)]
 pub(super) enum AgentStartError {
     InvalidName,
     EmptyArgv,
@@ -666,7 +667,7 @@ pub(super) enum AgentRenameError {
     },
 }
 
-fn remote_transport_agent(transport: &AgentTransportInfo) -> Option<&str> {
+pub(super) fn remote_transport_agent(transport: &AgentTransportInfo) -> Option<&str> {
     match transport {
         AgentTransportInfo::Ssh { remote_agent, .. } => remote_agent.as_deref(),
     }

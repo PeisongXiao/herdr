@@ -343,6 +343,7 @@ impl App {
             id,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             },
         )
     }
@@ -376,6 +377,7 @@ impl App {
             id,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             },
         )
     }
@@ -404,6 +406,7 @@ impl App {
             id,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             },
         )
     }

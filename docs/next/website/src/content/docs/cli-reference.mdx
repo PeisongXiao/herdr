@@ -97,7 +97,7 @@ herdr server update-agent-manifests [--json]
 herdr server reload-agent-manifests
 ```
 
-`herdr server` runs the headless server explicitly. Use it for supervised or service-style setups. `ensure` starts the background server only when it is not already running. `server stop` warns when remotely presented panes will be terminated; run `herdr remote-handoff` inside a pane first when it must continue on its host. `reload-config` applies reloadable settings without restarting panes. `agent-manifests` shows the active agent detection manifest sources, cached remote versions, and last remote update results. `update-agent-manifests` fetches remote manifest updates immediately, reloads them into the running server, and prints the updated manifest status; pass `--json` for the raw status response. `reload-agent-manifests` reloads agent detection manifests into the running server after local override edits.
+`herdr server` runs the headless server explicitly. Use it for supervised or service-style setups. `ensure` starts the background server only when it is not already running. `server stop` warns when remotely presented panes will be terminated; run `herdr remote-handoff` inside a pane first when it must continue on its host, or enable `[remote] auto_remote_handoff` to hand every delegated pane back automatically on stop. `reload-config` applies reloadable settings without restarting panes. `agent-manifests` shows the active agent detection manifest sources, cached remote versions, and last remote update results. `update-agent-manifests` fetches remote manifest updates immediately, reloads them into the running server, and prints the updated manifest status; pass `--json` for the raw status response. `reload-agent-manifests` reloads agent detection manifests into the running server after local override edits.
 
 ## Notifications
 
@@ -331,9 +331,12 @@ without taking input, resize, scroll, or takeover authority.
 herdr peer list
 herdr peer health <peer_id>
 herdr peer unregister <peer_id>
+herdr remote-resume [--list] [--peer PEER_ID]
 ```
 
 Peers are runtime links created by `ssh TARGET` inside a Herdr pane or by `herdr agent start --ssh`. `peer list` shows their generated ids, `peer health` refreshes reachability, and `peer unregister` removes all managed bridges for that peer. A plain SSH bridge closes with its foreground attach; while it is open, the wrapper renews a 15-second server lease so abrupt wrapper termination is cleaned up automatically. The incoming reverse registration has its own 15-second lease, renewed only after a successful metadata refresh, so origin crashes or network loss remove ghost peers. A peer-agent attachment uses its own 15-second owner-presentation lease, renewed by successful remote metadata snapshots, so closing or crashing that attachment does not consume or tear down the shared peer bridge. Every bridge conditionally unregisters only the registration for its own forwarded socket, preserving concurrent bridges. Peer-aware agent commands accept `peer::target`. Links are not durable machine pairings and must be recreated after the owning Herdr server restarts. Losing an owning link terminates its delegated pane unless `remote-handoff` has already moved that pane into a workspace on its host. Active links, active presentation leases, and detached bridge cleanup block server live handoff; after unregistering, wait for cleanup to finish before retrying.
+
+`herdr remote-resume` retries re-acquiring remote panes that a previous graceful server stop handed off under `[remote] auto_remote_handoff`. Automatic re-acquire at server start is non-interactive, so panes on hosts that need a password or MFA stay pending; `remote-resume` authenticates in the foreground like a normal `ssh` login and resumes them. `--list` shows pending panes and their last errors without resuming; `--peer` limits the retry to one peer.
 
 ## Waits
 

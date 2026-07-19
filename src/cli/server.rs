@@ -32,10 +32,17 @@ fn server_stop(args: &[String]) -> std::io::Result<i32> {
     }
 
     match crate::session::stop_active_server() {
-        Ok(terminated) => {
-            if terminated > 0 {
+        Ok(outcome) => {
+            if outcome.handed_off_remote_presentations > 0 {
                 eprintln!(
-                    "warning: stopping Herdr terminated {terminated} remotely presented pane(s); use `herdr remote-handoff` inside a pane before stopping to keep it running on its host"
+                    "handed off {} remote pane(s) to their hosts; they will be re-acquired on the next server start, or now with `herdr remote-resume`",
+                    outcome.handed_off_remote_presentations
+                );
+            }
+            if outcome.terminated_remote_presentations > 0 {
+                eprintln!(
+                    "warning: stopping Herdr terminated {} remotely presented pane(s); use `herdr remote-handoff` inside a pane before stopping to keep it running on its host",
+                    outcome.terminated_remote_presentations
                 );
             }
             Ok(0)

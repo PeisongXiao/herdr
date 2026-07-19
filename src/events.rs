@@ -70,6 +70,27 @@ pub struct RemoteAgentStartResult {
     pub respond_to: std::sync::mpsc::Sender<String>,
 }
 
+/// One re-acquire attempt per handed-off pane, completed outside the app
+/// loop. Carries the resume record so the app can prune it on success or
+/// annotate it with the failure.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct RemoteReacquireResult {
+    pub record: crate::remote_resume::ResumeRecord,
+    pub result: Result<crate::remote_agent::RemoteAgentStart, String>,
+}
+
+/// A batch of re-acquire attempts (one peer) completed outside the app loop.
+/// `respond_to` is set when a `remote.resume` API request is waiting for the
+/// per-record outcomes.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct RemoteReacquireBatch {
+    pub peer_id: String,
+    pub results: Vec<RemoteReacquireResult>,
+    pub respond_to: Option<(String, std::sync::mpsc::Sender<String>)>,
+}
+
 #[derive(Debug)]
 pub struct PeerAgentRequestResult {
     pub id: String,
@@ -176,6 +197,9 @@ pub enum AppEvent {
     PeerConnectSshFinished(Box<PeerConnectSshResult>),
     /// Remote agent setup completed outside the app loop.
     RemoteAgentStartFinished(Box<RemoteAgentStartResult>),
+    /// Remote pane re-acquire attempts completed outside the app loop.
+    #[cfg(unix)]
+    RemoteReacquireFinished(Box<RemoteReacquireBatch>),
     /// A peer-routed agent operation completed outside the app loop.
     PeerAgentRequestFinished(Box<PeerAgentRequestResult>),
     /// A peer health operation completed outside the app loop.

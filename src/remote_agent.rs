@@ -350,6 +350,36 @@ pub(crate) fn connect_shell(
     unix::connect_shell(params)
 }
 
+/// Ask the remote host to hand a delegated pane back into its own workspace
+/// list. Used by automatic handoff on graceful server stop.
+#[cfg(unix)]
+pub(crate) fn handoff_delegated_terminal(
+    peer: &PeerInfo,
+    delegation: &crate::api::schema::TerminalDelegationInfo,
+) -> io::Result<()> {
+    unix::handoff_delegated_terminal(peer, delegation)
+}
+
+/// Re-acquire a pane that was handed off to its host by a previous graceful
+/// server stop. `managed_control_path` comes from an interactive CLI retry
+/// (`herdr remote-resume`); automatic re-acquire passes `None` and relies on
+/// BatchMode-compatible SSH authentication (keys or agent).
+#[cfg(unix)]
+pub(crate) fn reacquire(
+    record: &crate::remote_resume::ResumeRecord,
+    managed_control_path: Option<String>,
+) -> io::Result<RemoteAgentStart> {
+    unix::reacquire(record, managed_control_path)
+}
+
+/// Roll back a failed re-acquire: abandon the uncommitted delegation and stop
+/// the peer bridge. Unlike `RemoteAgentStart::rollback` this never closes a
+/// remote tab, because re-acquire never creates one.
+#[cfg(unix)]
+pub(crate) fn rollback_reacquire(start: &mut RemoteAgentStart) {
+    unix::rollback_reacquire(start)
+}
+
 #[cfg(unix)]
 pub(crate) fn peer_id_for_connect_params(
     params: &crate::api::schema::PeerConnectSshParams,
@@ -1296,6 +1326,157 @@ mod unix {
             managed_control_path: params.managed_control_path.clone(),
             session: params.session.clone(),
         })
+    }
+
+    fn ssh_connection_for_peer(peer: &PeerInfo) -> io::Result<SshConnection> {
+        let crate::api::schema::PeerTransportInfo::Ssh {
+            target,
+            ssh_args,
+            managed_control_path,
+            session,
+        } = &peer.transport
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("peer {} is not an SSH peer", peer.id),
+            ));
+        };
+        Ok(SshConnection {
+            target: target.clone(),
+            ssh_args: ssh_args.clone(),
+            managed_control_path: managed_control_path.clone(),
+            session: session.clone(),
+        })
+    }
+
+    pub(super) fn handoff_delegated_terminal(
+        peer: &PeerInfo,
+        delegation: &crate::api::schema::TerminalDelegationInfo,
+    ) -> io::Result<()> {
+        let connection = ssh_connection_for_peer(peer)?;
+        let response = remote_api_request(
+            &connection,
+            serde_json::json!({
+                "id": "remote-terminal:delegate:handoff",
+                "method": "terminal.delegate.handoff",
+                "params": { "pane_id": delegation.pane_id },
+            }),
+        )?;
+        if let Some(message) = response["error"]["message"].as_str() {
+            return Err(io::Error::other(format!(
+                "remote Herdr could not hand off the terminal: {message}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(super) fn reacquire(
+        record: &crate::remote_resume::ResumeRecord,
+        managed_control_path: Option<String>,
+    ) -> io::Result<RemoteAgentStart> {
+        let connection = SshConnection {
+            target: record.ssh.target.clone(),
+            ssh_args: record.ssh.ssh_args.clone(),
+            managed_control_path,
+            session: Some(explicit_remote_session(record.ssh.session.as_deref())?),
+        };
+        validate_ssh_target(&connection.target)?;
+        validate_managed_control_connection(&connection)?;
+        validate_effective_ssh_config(&connection)?;
+        ensure_remote_herdr(&connection)?;
+        verify_remote_peer_capability(&connection)?;
+        let (peer, mut bridge) = start_reverse_peer_bridge(&connection)?;
+        if let Err(err) = bridge.registration().register() {
+            let err = unmanaged_bridge_failure(&bridge.child, err);
+            bridge.stop(true);
+            return Err(err);
+        }
+        drain_unmanaged_bridge_stderr(&bridge.child);
+        if let Err(err) = bridge.start_supervisor() {
+            bridge.stop(true);
+            return Err(err);
+        }
+        // Confirm the handed-off pane still exists before claiming it; a pane
+        // that exited on its host must not leave a dangling delegation.
+        let agent = match remote_agent_get(&connection, &record.remote_pane_id) {
+            Ok(agent) => agent,
+            Err(err) => {
+                bridge.stop(true);
+                return Err(err);
+            }
+        };
+        let owner_peer_id = local_peer_id();
+        let delegation = match prepare_remote_terminal_claim(
+            &connection,
+            crate::api::schema::TerminalDelegateClaimParams {
+                target: record.remote_terminal_id.clone(),
+                owner: crate::api::schema::TerminalPresentationOwner {
+                    peer_id: owner_peer_id.clone(),
+                    pane_id: "remote-resume".into(),
+                    route: vec![owner_peer_id],
+                },
+                takeover: false,
+                // A failed re-acquire must leave the pane alive on its host.
+                terminate_on_expire: false,
+            },
+        ) {
+            Ok(delegation) => delegation,
+            Err(err) => {
+                bridge.stop(true);
+                return Err(err);
+            }
+        };
+        let delegation_claim = crate::api::schema::TerminalDelegationClaim {
+            delegation_id: delegation.delegation_id.clone(),
+            epoch: delegation.epoch,
+        };
+        let attach_argv = super::ssh_attach_argv(
+            &connection.target,
+            &connection.ssh_args,
+            connection.managed_control_path.as_deref(),
+            connection.session.as_deref(),
+            &record.remote_terminal_id,
+            false,
+            Some(&delegation_claim),
+        );
+        let transport = AgentTransportInfo::Ssh {
+            target: connection.target.clone(),
+            ssh_args: connection.ssh_args.clone(),
+            managed_control_path: connection.managed_control_path.clone(),
+            session: connection.session.clone(),
+            remote_terminal_id: record.remote_terminal_id.clone(),
+            remote_pane_id: record.remote_pane_id.clone(),
+            remote_agent: agent.agent.clone(),
+            remote_cwd: agent.cwd.clone(),
+        };
+        Ok(RemoteAgentStart {
+            agent,
+            delegation,
+            attach_argv,
+            transport,
+            peer: Some(peer),
+            bridge: Some(bridge),
+        })
+    }
+
+    pub(super) fn rollback_reacquire(start: &mut RemoteAgentStart) {
+        if let Some(mut bridge) = start.bridge.take() {
+            let connection = bridge.connection.clone();
+            let terminate = crate::api::schema::Request {
+                id: "remote-terminal:delegate:abandon".into(),
+                method: crate::api::schema::Method::TerminalDelegateTerminate(
+                    crate::api::schema::TerminalDelegationTarget {
+                        delegation_id: start.delegation.delegation_id.clone(),
+                        epoch: start.delegation.epoch,
+                    },
+                ),
+            };
+            let value = serde_json::to_value(terminate);
+            if let Ok(value) = value {
+                let _ = remote_api_request(&connection, value);
+            }
+            bridge.stop(true);
+        }
     }
 
     pub(super) fn spawn_mirror(

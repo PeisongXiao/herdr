@@ -247,6 +247,27 @@ A plain pane `ssh` bridge is released when that foreground SSH attach ends. The 
 
 Concurrent connections to the same peer are tracked independently, and removing one does not terminate the others. During shutdown, every bridge checks that the remote registration still points to its own forwarded socket before unregistering it, so cleanup cannot remove a surviving bridge's newer registration. Socket and control-connection cleanup continues on a detached worker. Peer links are runtime state, not durable machine pairings: `herdr peer health <peer_id>` refreshes status, `herdr peer unregister <peer_id>` removes all active bridges for that peer, and a server restart requires reconnecting. Active or pending presentations, active links, and detached cleanup block server live handoff; after handing back or closing remote panes and unregistering the final peer, wait briefly for cleanup to finish before retrying. Delegated panes owned through a removed or expired route are terminated rather than left running invisibly. Rerun supported `ssh` to create a fresh remote shell, or hand off before disconnecting when the existing pane must survive.
 
+## Automatic handoff on server stop
+
+Delegated remote panes normally die with their owner: stopping the local Herdr server terminates the remote pane and its process. With `[remote] auto_remote_handoff = true`, a graceful server stop instead hands each delegated pane back to its host — the same move `herdr remote-handoff` performs for one pane — and the next server start re-acquires the pane into the workspace and tab it came from. This is meant for shutting the local machine down while the remote hosts keep running.
+
+```toml
+[remote]
+auto_remote_handoff = true
+```
+
+On stop, Herdr persists one resume record per pane (SSH target, remote session, remote terminal, and local placement), asks each remote host to hand its panes back, and only then shuts down. Panes that cannot be handed off — for example a pane that owns a deeper nested SSH presentation — keep the destructive stop contract, and the stop output reports how many panes were handed off and how many were terminated. Records live under the Herdr state directory at `remote-resume/v1/`, scoped to the local session, and are removed once a pane is re-acquired or found to be gone.
+
+On the next start, Herdr re-acquires every pending record in the background: it reconnects, re-checks protocol and capabilities, re-links the peer, claims the recorded terminal, and places the attach pane back where the original lived, closing the placeholder shell session restore left in its slot. Automatic re-acquire cannot prompt, so it only works with non-interactive SSH authentication (keys or agent). Records that need a password or MFA stay pending with their last error; resume them interactively:
+
+```bash
+herdr remote-resume            # retry every pending pane, prompting for SSH auth as needed
+herdr remote-resume --peer workbox
+herdr remote-resume --list     # show pending panes without resuming
+```
+
+This upgrades *graceful* stops only. A crash, power loss, or network failure still terminates delegated panes under the existing contract, because no handoff can run. `herdr update --handoff` remains blocked by active presentations; hand remote panes back or close them before updating. Nested SSH chains unwind only one hop: the directly owned pane is handed off, and deeper panes are terminated on stop.
+
 ## Direct terminal attach
 
 Full Herdr attach opens the whole workspace UI. Direct attach opens one server-owned terminal in your current terminal.

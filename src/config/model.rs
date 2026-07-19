@@ -861,6 +861,9 @@ pub struct RemoteConfig {
     /// Intercept interactive `ssh <host>` inside Herdr panes and attach to the remote Herdr server.
     /// Default: true.
     pub ssh_integration: bool,
+    /// On graceful server stop, hand delegated remote panes back to their hosts and
+    /// re-acquire them on the next server start. Default: false.
+    pub auto_remote_handoff: bool,
 }
 
 impl Default for RemoteConfig {
@@ -868,6 +871,7 @@ impl Default for RemoteConfig {
         Self {
             manage_ssh_config: true,
             ssh_integration: true,
+            auto_remote_handoff: false,
         }
     }
 }

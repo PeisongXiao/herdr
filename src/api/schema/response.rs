@@ -252,6 +252,11 @@ pub enum ResponseResult {
     Ok {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminated_remote_presentations: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handed_off_remote_presentations: Option<usize>,
+    },
+    RemoteResume {
+        outcomes: Vec<crate::api::schema::RemoteResumeOutcome>,
     },
 }
 

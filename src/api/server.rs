@@ -546,6 +546,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PeerUnregister(_) => "peer.unregister",
         Method::PeerList(_) => "peer.list",
         Method::PeerHealth(_) => "peer.health",
+        Method::RemoteResume(_) => "remote.resume",
         Method::PaneSplit(_) => "pane.split",
         Method::PaneSwap(_) => "pane.swap",
         Method::PaneMove(_) => "pane.move",
@@ -953,6 +954,7 @@ mod tests {
                     id: response_id.clone(),
                     result: ResponseResult::Ok {
                         terminated_remote_presentations: None,
+                        handed_off_remote_presentations: None,
                     },
                 })
                 .unwrap(),
@@ -1197,6 +1199,7 @@ mod tests {
                     id: "req_2".into(),
                     result: ResponseResult::Ok {
                         terminated_remote_presentations: None,
+                        handed_off_remote_presentations: None,
                     },
                 })
                 .unwrap(),

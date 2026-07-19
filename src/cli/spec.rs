@@ -40,6 +40,12 @@ pub(super) fn command() -> Command {
             .subcommand(Command::new("remote-handoff").about(
                 "Move the remote pane containing the cursor into a new workspace on its host",
             ))
+            .subcommand(
+                Command::new("remote-resume")
+                    .about("Re-acquire remote panes handed off by a previous server stop")
+                    .arg(option("peer", "PEER_ID"))
+                    .arg(flag("list")),
+            )
             .subcommand(pane_command())
             .subcommand(peer_command())
             .subcommand(wait_command())

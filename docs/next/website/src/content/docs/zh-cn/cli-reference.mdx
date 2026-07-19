@@ -89,7 +89,7 @@ herdr server update-agent-manifests [--json]
 herdr server reload-agent-manifests
 ```
 
-`herdr server` 显式运行无界面服务器,适合被监管或服务式的部署。`ensure` 只在服务器尚未运行时启动后台服务器。`server stop` 会在即将终止远程展示窗格时警告;需要保留时先在窗格内运行 `herdr remote-handoff`。`reload-config` 在不重启窗格的情况下应用可重载设置。`agent-manifests` 显示生效的智能体检测清单来源、缓存的远程版本和最近的远程更新结果。`update-agent-manifests` 立即拉取远程清单更新,重载到运行中的服务器,并打印更新后的清单状态;要原始状态响应就加 `--json`。`reload-agent-manifests` 在编辑本地覆盖后,把智能体检测清单重载到运行中的服务器。
+`herdr server` 显式运行无界面服务器,适合被监管或服务式的部署。`ensure` 只在服务器尚未运行时启动后台服务器。`server stop` 会在即将终止远程展示窗格时警告;需要保留时先在窗格内运行 `herdr remote-handoff`,或启用 `[remote] auto_remote_handoff` 让停止时自动交还所有委派窗格。`reload-config` 在不重启窗格的情况下应用可重载设置。`agent-manifests` 显示生效的智能体检测清单来源、缓存的远程版本和最近的远程更新结果。`update-agent-manifests` 立即拉取远程清单更新,重载到运行中的服务器,并打印更新后的清单状态;要原始状态响应就加 `--json`。`reload-agent-manifests` 在编辑本地覆盖后,把智能体检测清单重载到运行中的服务器。
 
 ## 通知
 
@@ -291,9 +291,12 @@ herdr terminal title clear
 herdr peer list
 herdr peer health <peer_id>
 herdr peer unregister <peer_id>
+herdr remote-resume [--list] [--peer PEER_ID]
 ```
 
 peer 是由 Herdr 窗格内的 `ssh TARGET` 或 `agent start --ssh` 建立的运行时链接。`peer list` 显示生成的 id,`peer health` 刷新可达性,`peer unregister` 移除该 peer 的全部托管桥。普通 SSH bridge 随前台 attach 关闭,wrapper 每三秒续租一次 15 秒 lease,因此 wrapper 崩溃也会自动回收。peer 不是持久配对;服务器重启后必须重新连接。活动或准备中的展示、peer 链接或后台清理会阻止服务器 live handoff。
+
+`herdr remote-resume` 用于重试取回上一次正常停止时通过 `[remote] auto_remote_handoff` 交还给主机的远程窗格。服务器启动时的自动取回是非交互式的,因此需要密码或 MFA 的主机窗格会保持 pending;`remote-resume` 会像普通 `ssh` 登录一样在前台完成认证并取回。`--list` 只显示 pending 窗格及其最近的错误,`--peer` 将重试限制在单个 peer。
 
 ## 等待
 

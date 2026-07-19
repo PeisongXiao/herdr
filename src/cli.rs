@@ -26,6 +26,8 @@ mod notification;
 mod pane;
 mod peer;
 mod plugin;
+#[cfg(unix)]
+mod remote_resume;
 mod runtime;
 mod server;
 mod spec;
@@ -101,6 +103,13 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "tab" => tab::run_tab_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
+        #[cfg(unix)]
+        "remote-resume" => remote_resume::run_remote_resume_command(&args[2..])?,
+        #[cfg(not(unix))]
+        "remote-resume" => {
+            eprintln!("herdr remote-resume is only supported on Unix");
+            1
+        }
         "ssh" => run_ssh_command(&args[2..])?,
         "remote-handoff" => run_remote_handoff_command(&args[2..])?,
         "terminal" => run_terminal_command(&args[2..])?,

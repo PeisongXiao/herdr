@@ -89,7 +89,7 @@ herdr server update-agent-manifests [--json]
 herdr server reload-agent-manifests
 ```
 
-`herdr server` はヘッドレスサーバーを明示的に起動します。監視下やサービス的な構成で使ってください。`ensure` はサーバーが未起動の場合だけバックグラウンドサーバーを起動します。`server stop` は remotely presented pane を終了する場合に警告するため、残す必要があれば先にそのペイン内で `herdr remote-handoff` を実行します。`reload-config` はペインを再起動せずにリロード可能な設定を適用します。`agent-manifests` は、アクティブなエージェント検出マニフェストのソース、キャッシュされたリモートバージョン、直近のリモート更新結果を表示します。`update-agent-manifests` はリモートマニフェストの更新を即座に取得し、実行中のサーバーにリロードして、更新後のマニフェスト状態を表示します。生のステータスレスポンスが欲しいときは `--json` を渡してください。`reload-agent-manifests` は、ローカルオーバーライドの編集後にエージェント検出マニフェストを実行中のサーバーにリロードします。
+`herdr server` はヘッドレスサーバーを明示的に起動します。監視下やサービス的な構成で使ってください。`ensure` はサーバーが未起動の場合だけバックグラウンドサーバーを起動します。`server stop` は remotely presented pane を終了する場合に警告するため、残す必要があれば先にそのペイン内で `herdr remote-handoff` を実行するか、`[remote] auto_remote_handoff` を有効にして停止時にすべての委譲ペインを自動で引き渡します。`reload-config` はペインを再起動せずにリロード可能な設定を適用します。`agent-manifests` は、アクティブなエージェント検出マニフェストのソース、キャッシュされたリモートバージョン、直近のリモート更新結果を表示します。`update-agent-manifests` はリモートマニフェストの更新を即座に取得し、実行中のサーバーにリロードして、更新後のマニフェスト状態を表示します。生のステータスレスポンスが欲しいときは `--json` を渡してください。`reload-agent-manifests` は、ローカルオーバーライドの編集後にエージェント検出マニフェストを実行中のサーバーにリロードします。
 
 ## 通知
 
@@ -291,9 +291,12 @@ herdr terminal title clear
 herdr peer list
 herdr peer health <peer_id>
 herdr peer unregister <peer_id>
+herdr remote-resume [--list] [--peer PEER_ID]
 ```
 
 peer は Herdr ペイン内の `ssh TARGET` または `agent start --ssh` が作る runtime link です。`list` は生成 id、`health` は reachability refresh、`unregister` はその peer の managed bridge をすべて削除します。plain SSH bridge は foreground attach とともに閉じ、wrapper が 15 秒 lease を 3 秒ごとに renew するため crash も回収されます。peer は persistent pairing ではなく、server restart 後は再接続が必要です。active/pending presentation、peer link、background cleanup は server live handoff を block します。
+
+`herdr remote-resume` は、前回の正常停止が `[remote] auto_remote_handoff` でホストへ引き渡したリモートペインの再取得を再試行します。サーバー起動時の自動再取得は非対話的なので、パスワードや MFA が必要なホストのペインは pending のまま残り、`remote-resume` が通常の `ssh` ログインのようにフォアグラウンドで認証して再取得します。`--list` は pending のペインと最後のエラーを再取得せずに表示し、`--peer` は再試行を 1 peer に限定します。
 
 ## Wait
 

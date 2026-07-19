@@ -38,6 +38,7 @@ impl App {
             &request.method,
             crate::api::schema::Method::PeerConnectSsh(_)
                 | crate::api::schema::Method::PeerHealth(_)
+                | crate::api::schema::Method::RemoteResume(_)
                 | crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
                     peer: None,
                     transport: Some(_),
@@ -65,6 +66,18 @@ impl App {
             }
             crate::api::schema::Method::PeerHealth(target) => {
                 self.begin_peer_health(request.id, target, respond_to);
+            }
+            #[cfg(unix)]
+            crate::api::schema::Method::RemoteResume(params) => {
+                self.begin_remote_resume(request.id, params, respond_to);
+            }
+            #[cfg(not(unix))]
+            crate::api::schema::Method::RemoteResume(_) => {
+                let _ = respond_to.send(responses::encode_error(
+                    request.id,
+                    "unsupported_platform",
+                    "remote pane resume is only supported on Unix",
+                ));
             }
             method if self.should_defer_peer_agent_request(&method) => {
                 self.begin_peer_agent_request(request.id, method, respond_to);
@@ -258,6 +271,23 @@ impl App {
                 ));
                 None
             }
+            #[cfg(unix)]
+            AppEvent::RemoteReacquireFinished(batch) => {
+                let mut batch = *batch;
+                for finished in &mut batch.results {
+                    if let Ok(remote) = &mut finished.result {
+                        crate::remote_agent::rollback_reacquire(remote);
+                    }
+                }
+                if let Some((id, respond_to)) = batch.respond_to.take() {
+                    let _ = respond_to.send(responses::encode_error(
+                        id,
+                        "server_unavailable",
+                        "server shut down while remote pane re-acquire was running",
+                    ));
+                }
+                None
+            }
             AppEvent::PeerAgentRequestFinished(result) => {
                 self.finish_remote_api_job();
                 self.handle_peer_agent_request_finished(*result);
@@ -341,6 +371,12 @@ impl App {
         if let AppEvent::RemoteAgentStartFinished(result) = ev {
             self.finish_remote_api_job();
             self.handle_remote_agent_start_finished(*result);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::RemoteReacquireFinished(batch) = ev {
+            self.finish_remote_reacquire(*batch);
             return;
         }
 
@@ -1201,12 +1237,17 @@ impl App {
 
         let response = match request.method {
             Method::ServerStop(_) => {
+                #[cfg(unix)]
+                let handed_off_remote_presentations = self.auto_handoff_remote_presentations();
+                #[cfg(not(unix))]
+                let handed_off_remote_presentations = 0usize;
                 let terminated_remote_presentations = self.shutdown_remote_presentation_count();
                 self.state.should_quit = true;
                 SuccessResponse {
                     id: request.id,
                     result: ResponseResult::Ok {
                         terminated_remote_presentations: Some(terminated_remote_presentations),
+                        handed_off_remote_presentations: Some(handed_off_remote_presentations),
                     },
                 }
             }
@@ -1431,6 +1472,18 @@ impl App {
             }
             Method::PeerList(_) => return self.handle_peer_list(request.id),
             Method::PeerHealth(target) => return self.handle_peer_health(request.id, target),
+            #[cfg(unix)]
+            Method::RemoteResume(params) => {
+                return self.handle_remote_resume(request.id, params);
+            }
+            #[cfg(not(unix))]
+            Method::RemoteResume(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "unsupported_platform",
+                    "remote pane resume is only supported on Unix",
+                );
+            }
             Method::IntegrationInstall(params) => {
                 return self.handle_integration_install(request.id, params);
             }

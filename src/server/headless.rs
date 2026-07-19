@@ -2926,6 +2926,7 @@ impl HeadlessServer {
                     id: msg.request.id,
                     result: api::schema::ResponseResult::Ok {
                         terminated_remote_presentations: None,
+                        handed_off_remote_presentations: None,
                     },
                 }),
                 Err(err) => serde_json::to_string(&api::schema::ErrorResponse {
@@ -3967,6 +3968,16 @@ impl HeadlessServer {
             );
             self.app.event_rx.close();
         }
+        #[cfg(unix)]
+        {
+            let handed_off = self.app.auto_handoff_remote_presentations();
+            if handed_off > 0 {
+                info!(
+                    count = handed_off,
+                    "handed off remote panes to their hosts during server shutdown"
+                );
+            }
+        }
         let terminated_remote_presentations = self.app.terminate_all_remote_presentations();
         if terminated_remote_presentations > 0 {
             warn!(
@@ -4171,6 +4182,11 @@ pub fn run_server() -> io::Result<()> {
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
         app.local_input_source_switch = false;
+
+        // Re-acquire any remote panes a previous graceful stop handed off to
+        // their hosts. Runs in background workers; panes appear as links come up.
+        #[cfg(unix)]
+        app.spawn_remote_reacquires();
 
         // Create the headless server.
         let mut server = match HeadlessServer::new(

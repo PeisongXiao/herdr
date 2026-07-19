@@ -128,6 +128,29 @@ pub struct PeerKeepaliveSshParams {
     pub connection_id: String,
 }
 
+/// Retry re-acquiring handed-off remote panes. Sent by `herdr remote-resume`
+/// after the CLI has authenticated a managed SSH control connection for the
+/// peer; the server then runs the re-acquire for each stored resume record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RemoteResumeParams {
+    /// Limit the retry to one peer. Without it every pending record resumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    /// Interactive managed control path for the peer, when the CLI prepared
+    /// one. Automatic re-acquire passes none and relies on BatchMode auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_control_path: Option<String>,
+}
+
+/// Per-record outcome of a `remote.resume` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RemoteResumeOutcome {
+    pub remote_terminal_id: String,
+    pub peer_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PeerInfo {
     pub id: String,

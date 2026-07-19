@@ -15,6 +15,8 @@ mod ids;
 mod input;
 mod peer_agents;
 mod remote_presentations;
+#[cfg(unix)]
+mod remote_resume;
 mod runtime;
 mod runtime_mutations;
 mod session;
@@ -155,6 +157,9 @@ pub struct App {
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
     pub(crate) update_version_check_enabled: bool,
     pub(crate) update_manifest_check_enabled: bool,
+    /// `[remote] auto_remote_handoff`: hand delegated remote panes back to
+    /// their hosts on graceful stop and re-acquire them on the next start.
+    pub(crate) auto_remote_handoff: bool,
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
@@ -773,6 +778,7 @@ impl App {
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             update_version_check_enabled: config.update.version_check,
             update_manifest_check_enabled: config.update.manifest_check,
+            auto_remote_handoff: config.remote.auto_remote_handoff,
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
@@ -1164,6 +1170,16 @@ impl App {
             );
             self.event_rx.close();
         }
+        #[cfg(unix)]
+        {
+            let handed_off = self.auto_handoff_remote_presentations();
+            if handed_off > 0 {
+                tracing::info!(
+                    count = handed_off,
+                    "handed off remote panes to their hosts during app shutdown"
+                );
+            }
+        }
         let terminated_remote_presentations = self.terminate_all_remote_presentations();
         if terminated_remote_presentations > 0 {
             tracing::warn!(
@@ -1505,6 +1521,10 @@ impl App {
 
         if !invalid_section("advanced") {
             self.state.pane_scrollback_limit_bytes = config.advanced.scrollback_limit_bytes;
+        }
+
+        if !invalid_section("remote") {
+            self.auto_remote_handoff = config.remote.auto_remote_handoff;
         }
 
         if !invalid_section("update") {

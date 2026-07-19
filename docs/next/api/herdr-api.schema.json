@@ -3359,6 +3359,26 @@
           ],
           "type": "string"
         },
+        "RemoteResumeParams": {
+          "description": "Retry re-acquiring handed-off remote panes. Sent by `herdr remote-resume`\nafter the CLI has authenticated a managed SSH control connection for the\npeer; the server then runs the re-acquire for each stored resume record.",
+          "properties": {
+            "managed_control_path": {
+              "description": "Interactive managed control path for the peer, when the CLI prepared\none. Automatic re-acquire passes none and relies on BatchMode auth.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "peer_id": {
+              "description": "Limit the retry to one peer. Without it every pending record resumes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "ServerLiveHandoffParams": {
           "properties": {
             "expected_protocol": {
@@ -5474,6 +5494,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PeerKeepaliveSshParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "remote.resume",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/RemoteResumeParams"
             }
           },
           "required": [
@@ -8640,6 +8676,28 @@
           ],
           "type": "string"
         },
+        "RemoteResumeOutcome": {
+          "description": "Per-record outcome of a `remote.resume` request.",
+          "properties": {
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "peer_id": {
+              "type": "string"
+            },
+            "remote_terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "remote_terminal_id",
+            "peer_id"
+          ],
+          "type": "object"
+        },
         "ResponseResult": {
           "oneOf": [
             {
@@ -9748,6 +9806,14 @@
             },
             {
               "properties": {
+                "handed_off_remote_presentations": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "terminated_remote_presentations": {
                   "format": "uint",
                   "minimum": 0,
@@ -9763,6 +9829,25 @@
               },
               "required": [
                 "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "outcomes": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/RemoteResumeOutcome"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "remote_resume",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "outcomes"
               ],
               "type": "object"
             }

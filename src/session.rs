@@ -233,7 +233,7 @@ pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
     stop_session_with_timeout(name, STOP_WAIT_TIMEOUT)
 }
 
-pub(crate) fn stop_active_server() -> Result<usize, String> {
+pub(crate) fn stop_active_server() -> Result<StopOutcome, String> {
     let socket_path = active_api_socket_path();
     let client_socket_path = crate::server::socket_paths::client_socket_path();
     stop_socket_with_timeout(
@@ -244,11 +244,17 @@ pub(crate) fn stop_active_server() -> Result<usize, String> {
     )
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StopOutcome {
+    pub(crate) terminated_remote_presentations: usize,
+    pub(crate) handed_off_remote_presentations: usize,
+}
+
 fn stop_session_with_timeout(name: Option<&str>, timeout: Duration) -> Result<SessionInfo, String> {
     let socket_path = api_socket_path_for(name);
     let client_socket_path = client_socket_path_for(name);
     let label = format!("session {}", name.unwrap_or(DEFAULT_SESSION_NAME));
-    let _terminated_remote_presentations = stop_socket_with_timeout(
+    let _stop_outcome = stop_socket_with_timeout(
         socket_path.clone(),
         vec![socket_path, client_socket_path],
         timeout,
@@ -262,7 +268,7 @@ fn stop_socket_with_timeout(
     stopped_socket_paths: Vec<PathBuf>,
     timeout: Duration,
     label: &str,
-) -> Result<usize, String> {
+) -> Result<StopOutcome, String> {
     let deadline = Instant::now() + timeout;
     let request = serde_json::json!({
         "id": "cli:session:stop",
@@ -281,10 +287,10 @@ fn stop_socket_with_timeout(
             return Err(error.to_string());
         }
     }
-    let terminated_remote_presentations = stop_response
+    let outcome = stop_response
         .as_ref()
-        .map(terminated_remote_presentation_count)
-        .unwrap_or(0);
+        .map(remote_presentation_stop_outcome)
+        .unwrap_or_default();
     if !wait_until_stopped_until(&stopped_socket_paths, deadline) {
         let reachable = reachable_socket_paths(&stopped_socket_paths);
         return Err(format!(
@@ -297,16 +303,22 @@ fn stop_socket_with_timeout(
                 .join(", ")
         ));
     }
-    Ok(terminated_remote_presentations)
+    Ok(outcome)
 }
 
-fn terminated_remote_presentation_count(response: &serde_json::Value) -> usize {
-    response
-        .get("result")
-        .and_then(|result| result.get("terminated_remote_presentations"))
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|count| usize::try_from(count).ok())
-        .unwrap_or(0)
+fn remote_presentation_stop_outcome(response: &serde_json::Value) -> StopOutcome {
+    let count = |key: &str| {
+        response
+            .get("result")
+            .and_then(|result| result.get(key))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(0)
+    };
+    StopOutcome {
+        terminated_remote_presentations: count("terminated_remote_presentations"),
+        handed_off_remote_presentations: count("handed_off_remote_presentations"),
+    }
 }
 
 pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
@@ -550,16 +562,22 @@ mod tests {
     }
 
     #[test]
-    fn stop_response_reports_terminated_remote_presentations() {
+    fn stop_response_reports_remote_presentation_outcome() {
         assert_eq!(
-            terminated_remote_presentation_count(&serde_json::json!({
-                "result": { "terminated_remote_presentations": 3 }
+            remote_presentation_stop_outcome(&serde_json::json!({
+                "result": {
+                    "terminated_remote_presentations": 3,
+                    "handed_off_remote_presentations": 2
+                }
             })),
-            3
+            StopOutcome {
+                terminated_remote_presentations: 3,
+                handed_off_remote_presentations: 2,
+            }
         );
         assert_eq!(
-            terminated_remote_presentation_count(&serde_json::json!({ "result": {} })),
-            0
+            remote_presentation_stop_outcome(&serde_json::json!({ "result": {} })),
+            StopOutcome::default()
         );
     }
 

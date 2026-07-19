@@ -116,6 +116,7 @@ worktree 操作在 Git 工作区行上可用。`New worktree` 创建一个检出
 [remote]
 manage_ssh_config = true
 ssh_integration = true
+auto_remote_handoff = false
 ```
 
 启用时,`herdr --remote` 写入一个私有的临时 SSH 配置: 先包含你的 `~/.ssh/config` 和 `/etc/ssh/ssh_config`,再添加兜底的 `ServerAliveInterval` 和 `ServerAliveCountMax` 值。你自己的 SSH 保活设置优先。设置 `manage_ssh_config = false` 用普通 `ssh` 运行桥接,不使用 Herdr 生成的配置。
@@ -125,6 +126,8 @@ ssh_integration = true
 对于新建的 macOS login-zsh 窗格,包括默认的 `shell_mode = "auto"`,Herdr 使用一次性的私有启动钩子。它先恢复用户原本的 `ZDOTDIR` 和启动文件,等 `path_helper` 等登录初始化结束后,在第一个提示符重新把 shim 放到 `PATH` 前面并执行 `rehash`,随后自我移除。用户别名和函数仍按正常优先级工作,`/usr/bin/ssh` 这样的绝对路径会绕过 shim。已经运行的窗格要在重建后才获得新环境。
 
 此设置与 `manage_ssh_config` 相互独立: 窗格 SSH 集成始终使用自己的临时 OpenSSH 控制连接,而 `manage_ssh_config` 只控制 `herdr --remote`。设置 `ssh_integration = false` 可完全保留原始窗格 `ssh`,单次绕过则使用 `HERDR_SSH_BYPASS=1 ssh TARGET`。支持的命令形式、远程发现和 peer 链接边界见[持久化与远程访问](/zh-cn/docs/persistence-remote/)。
+
+设置 `auto_remote_handoff = true` 后,服务器正常停止时会把委派中的远程窗格交还给所在主机而不是终止它,并在下次服务器启动时把它重新取回原来的工作区与标签页。自动取回是非交互式的,因此需要基于密钥或 agent 的 SSH 认证;需要密码或 MFA 的主机会保留在记录中,可用 `herdr remote-resume` 手动取回。非正常停止(崩溃、断电、网络故障)仍会终止远程窗格,且超过一跳的嵌套 SSH 链不会被交还。完整生命周期见[持久化与远程访问](/zh-cn/docs/persistence-remote/#automatic-handoff-on-server-stop)。
 
 ## 按键绑定
 

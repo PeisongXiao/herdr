@@ -236,6 +236,27 @@ plain pane `ssh` bridge は foreground attach の終了時に解放され、wrap
 
 同じ peer への concurrent connection は独立し、一つを除いても他は終わりません。cleanup は remote registration が自身の forwarded socket を指している場合だけ unregister し、古い cleanup が replacement を消しません。socket/control cleanup は background worker で続きます。peer は runtime state で durable pairing ではなく、`peer health` で refresh、`peer unregister` で active bridge を削除し、server restart 後は再接続が必要です。active/pending presentation、peer link、pending cleanup は server live handoff を block します。removed/expired route に所有される delegated pane は invisible に残さず終了するため、残す場合は disconnect 前に handoff してください。
 
+## サーバー停止時の自動 handoff
+
+委譲されたリモートペインは通常、owner と運命を共にします。ローカル Herdr サーバーを停止するとリモートペインとそのプロセスは終了します。`[remote] auto_remote_handoff = true` にすると、正常停止時に各委譲ペインをホストへ引き渡し（1 ペインの `herdr remote-handoff` と同じ動作）、次回のサーバー起動時に元のワークスペースとタブへ再取得します。ローカルマシンをシャットダウンしながらリモートホストの作業を生かしておくための機能です。
+
+```toml
+[remote]
+auto_remote_handoff = true
+```
+
+停止時、Herdr はペインごとに resume record（SSH target、remote session、remote terminal、local placement）を永続化し、各リモートホストへ handoff を要求してからシャットダウンします。より深い nested SSH presentation を所有するペインなど、handoff できないペインは従来の destructive contract のまま残り、停止出力に引き渡し数と終了数が表示されます。record はローカルセッション単位で Herdr state directory の `remote-resume/v1/` に保存され、ペインが再取得されるか、ホスト上で消えたと分かった時点で削除されます。
+
+次回起動時、Herdr は pending の record をバックグラウンドで再取得します。再接続、protocol/capability 再確認、peer 再リンク、record の terminal を claim し、元の場所に attach ペインを配置し、session restore が残した placeholder shell を閉じます。自動再取得はプロンプトできないため、非対話的な SSH 認証（鍵またはエージェント）が必要です。パスワードや MFA が必要な record は最後のエラーとともに pending のまま残り、対話的に再取得できます:
+
+```bash
+herdr remote-resume            # すべての pending ペインを再試行（必要に応じて SSH 認証を要求）
+herdr remote-resume --peer workbox
+herdr remote-resume --list     # 再取得せずに pending ペインを表示
+```
+
+この機能が強化するのは正常停止だけです。crash、電源喪失、network failure では handoff を実行できないため、従来の contract どおり委譲ペインは終了します。`herdr update --handoff` は active presentation があると従来どおり block されます。更新前に handoff するか閉じてください。nested SSH chain の引き渡しは 1 ホップだけです。直接所有するペインは引き渡され、それより深いペインは停止時に終了します。
+
 ## ダイレクトターミナルアタッチ
 
 完全な Herdr アタッチはワークスペース UI 全体を開きます。ダイレクトアタッチは、サーバーが所有するターミナルをひとつだけ、現在のターミナルに開きます。

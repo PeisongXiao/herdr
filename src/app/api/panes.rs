@@ -1245,6 +1245,7 @@ impl App {
             id,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             },
         )
     }
@@ -1280,6 +1281,7 @@ impl App {
             id,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             },
         )
     }
@@ -1378,6 +1380,7 @@ impl App {
             id,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             },
         )
     }
@@ -1400,6 +1403,7 @@ impl App {
             id,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             },
         )
     }
@@ -1427,6 +1431,7 @@ impl App {
             id,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             },
         )
     }
@@ -1450,6 +1455,7 @@ impl App {
             id,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             },
         )
     }
@@ -1485,6 +1491,7 @@ impl App {
             id,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             },
         )
     }
@@ -1495,6 +1502,7 @@ impl App {
                 id,
                 ResponseResult::Ok {
                     terminated_remote_presentations: None,
+                    handed_off_remote_presentations: None,
                 },
             ),
             Err(response) => response,
@@ -1502,7 +1510,7 @@ impl App {
     }
 
     /// Close a pane; `Err` carries the encoded error response.
-    pub(super) fn close_pane(&mut self, id: String, target: &PaneTarget) -> Result<(), String> {
+    pub(crate) fn close_pane(&mut self, id: String, target: &PaneTarget) -> Result<(), String> {
         if let Some((delegation_id, epoch)) = self
             .delegated_pane_for_public_id(&target.pane_id)
             .map(|delegated| (delegated.info.delegation_id.clone(), delegated.info.epoch))
@@ -1612,6 +1620,7 @@ impl App {
             id,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             },
         )
     }
@@ -2009,6 +2018,7 @@ mod tests {
             success.result,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             }
         );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x08]));
@@ -2062,6 +2072,7 @@ mod tests {
             success.result,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             }
         );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x03]));
@@ -2088,6 +2099,7 @@ mod tests {
             success.result,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             }
         );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"+"));
@@ -2122,6 +2134,7 @@ mod tests {
             success.result,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             }
         );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"?"));
@@ -2147,6 +2160,7 @@ mod tests {
             success.result,
             ResponseResult::Ok {
                 terminated_remote_presentations: None,
+                handed_off_remote_presentations: None,
             }
         );
         assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from(vec![0x0a]));
