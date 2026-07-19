@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const ENTRY_NAME: &str = "herdr";
@@ -9,6 +9,7 @@ const DEFAULT_SESSION: &str = "default";
 const SESSION_ENV: &str = "HERDR_SESSION";
 const MANAGED_ENV: &str = "HERDR_MCP_MANAGED";
 const FULL_CONTROL_ENV: &str = "HERDR_MCP_FULL_CONTROL";
+const MAX_VERIFICATION_DIAGNOSTIC_BYTES: usize = 2_048;
 
 pub fn install(client: &str, full_control: bool) -> io::Result<i32> {
     let Some(client) = parse_client(client) else {
@@ -93,6 +94,14 @@ pub fn status(client: Option<&str>) -> io::Result<i32> {
                 } else {
                     "restricted"
                 };
+                if !registration.enabled {
+                    println!(
+                        "{}: disabled (managed entry, {access}, session {session})",
+                        client
+                    );
+                    exit_code = 1;
+                    continue;
+                }
                 println!("{}: installed ({access}, session {session})", client);
             }
             Ok(EntryState::Missing) => {
@@ -253,11 +262,13 @@ impl InstallContext {
 struct Registration {
     session: Option<String>,
     full_control: bool,
+    enabled: bool,
 }
 
 impl Registration {
     fn matches(&self, context: &InstallContext) -> bool {
-        self.session.as_deref() == Some(context.session.as_str())
+        self.enabled
+            && self.session.as_deref() == Some(context.session.as_str())
             && self.full_control == context.full_control
     }
 }
@@ -304,7 +315,7 @@ fn install_with_runner(
     }
 
     let invocation = install_invocation(client, context, updating)?;
-    run_checked(runner, invocation, "save registration")?;
+    let install_output = run_checked(runner, invocation, "save registration")?;
 
     match inspect(client, runner)? {
         EntryState::Managed(registration) if registration.matches(context) => {
@@ -314,18 +325,31 @@ fn install_with_runner(
                 Ok(InstallOutcome::Installed)
             }
         }
-        EntryState::Managed(_) => Err(io::Error::other(format!(
-            "{} saved entry '{ENTRY_NAME}', but its session or access mode does not match",
-            client.label()
-        ))),
-        EntryState::Missing => Err(io::Error::other(format!(
-            "{} did not save MCP entry '{ENTRY_NAME}'",
-            client.label()
-        ))),
-        EntryState::Foreign => Err(io::Error::other(format!(
-            "{} saved MCP entry '{ENTRY_NAME}' without the Herdr ownership marker",
-            client.label()
-        ))),
+        EntryState::Managed(registration) if !registration.enabled => Err(verification_error(
+            format!(
+                "{} saved MCP entry '{ENTRY_NAME}', but it is disabled",
+                client.label()
+            ),
+            &install_output,
+        )),
+        EntryState::Managed(_) => Err(verification_error(
+            format!(
+                "{} saved entry '{ENTRY_NAME}', but its session or access mode does not match",
+                client.label()
+            ),
+            &install_output,
+        )),
+        EntryState::Missing => Err(verification_error(
+            format!("{} did not save MCP entry '{ENTRY_NAME}'", client.label()),
+            &install_output,
+        )),
+        EntryState::Foreign => Err(verification_error(
+            format!(
+                "{} saved MCP entry '{ENTRY_NAME}' without the Herdr ownership marker",
+                client.label()
+            ),
+            &install_output,
+        )),
     }
 }
 
@@ -384,18 +408,35 @@ fn inspect_hermes(runner: &mut dyn Runner) -> io::Result<EntryState> {
         return Ok(EntryState::Missing);
     }
 
-    let config = Invocation::new(Client::Hermes, ["config"]);
-    let output = runner.run(&config)?;
+    let config_path_invocation = Invocation::new(Client::Hermes, ["config", "path"]);
+    let output = runner.run(&config_path_invocation)?;
     if !output.success {
         return Err(command_error(
             Client::Hermes,
-            "inspect registration",
-            &config,
+            "locate configuration",
+            &config_path_invocation,
             &output,
         ));
     }
 
-    let text = output.combined_text();
+    let config_path_text = output.stdout.trim();
+    if config_path_text.is_empty() {
+        return Err(io::Error::other(format!(
+            "Hermes returned an empty configuration path from `{}`",
+            config_path_invocation.display()
+        )));
+    }
+    let config_path = PathBuf::from(config_path_text);
+    let text = runner.read_to_string(&config_path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "Hermes configuration at '{}' (reported by `{}`) could not be read: {error}",
+                config_path.display(),
+                config_path_invocation.display()
+            ),
+        )
+    })?;
     let Some(block) = hermes_entry_block(&text) else {
         return Ok(EntryState::Foreign);
     };
@@ -442,9 +483,6 @@ fn install_invocation(
                 ENTRY_NAME.into(),
                 "--command".into(),
                 executable,
-                "--args".into(),
-                "mcp".into(),
-                "serve".into(),
                 "--env".into(),
             ];
             args.extend(
@@ -452,6 +490,10 @@ fn install_invocation(
                     .into_iter()
                     .map(|(key, value)| format!("{key}={value}")),
             );
+            // Hermes 0.17 parses --args as argparse::REMAINDER, so no Hermes
+            // option may follow it. Keeping it last also remains compatible
+            // with older Hermes releases.
+            args.extend(["--args".into(), "mcp".into(), "serve".into()]);
             let stdin = if updating { "y\n\n" } else { "\n" };
             Ok(Invocation::from_args(client, args).with_stdin(stdin))
         }
@@ -485,14 +527,43 @@ fn stdio_config_json(executable: &str, environment: &[(String, String)]) -> Stri
     .to_string()
 }
 
-fn run_checked(runner: &mut dyn Runner, invocation: Invocation, action: &str) -> io::Result<()> {
+fn run_checked(
+    runner: &mut dyn Runner,
+    invocation: Invocation,
+    action: &str,
+) -> io::Result<RunOutput> {
     let client = invocation.client;
     let output = runner.run(&invocation)?;
     if output.success {
-        Ok(())
+        Ok(output)
     } else {
         Err(command_error(client, action, &invocation, &output))
     }
+}
+
+fn verification_error(message: String, output: &RunOutput) -> io::Error {
+    let Some(diagnostic) = bounded_diagnostic(output) else {
+        return io::Error::other(message);
+    };
+    io::Error::other(format!("{message}\nClient command reported:\n{diagnostic}"))
+}
+
+fn bounded_diagnostic(output: &RunOutput) -> Option<String> {
+    let text = output.combined_text();
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if text.len() <= MAX_VERIFICATION_DIAGNOSTIC_BYTES {
+        return Some(text.to_string());
+    }
+
+    let tail_budget = MAX_VERIFICATION_DIAGNOSTIC_BYTES.saturating_sub(3);
+    let mut start = text.len().saturating_sub(tail_budget);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    Some(format!("...{}", &text[start..]))
 }
 
 fn command_error(
@@ -523,7 +594,54 @@ fn entry_state_from_text(text: &str) -> EntryState {
     EntryState::Managed(Registration {
         session: extract_env_value(text, SESSION_ENV),
         full_control: extract_env_value(text, FULL_CONTROL_ENV).as_deref() == Some("1"),
+        enabled: extract_enabled(text).unwrap_or(true),
     })
+}
+
+fn extract_enabled(text: &str) -> Option<bool> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        if let Some(value) = find_json_bool(&value, "enabled") {
+            return Some(value);
+        }
+    }
+
+    let mut lines = text.lines().filter(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    });
+    let first = lines.next()?;
+    let entry_indent = first.len() - first.trim_start().len();
+    let mut field_indent = None;
+
+    for line in lines {
+        let indent = line.len() - line.trim_start().len();
+        if indent <= entry_indent {
+            continue;
+        }
+        let expected_indent = *field_indent.get_or_insert(indent);
+        if indent != expected_indent {
+            continue;
+        }
+
+        let Some((key, value)) = line.trim().split_once(':') else {
+            continue;
+        };
+        if key.trim().trim_matches(['"', '\'']) != "enabled" {
+            continue;
+        }
+        let value = value
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(['"', '\''])
+            .to_ascii_lowercase();
+        return match value.as_str() {
+            "true" | "yes" | "1" => Some(true),
+            "false" | "no" | "0" => Some(false),
+            _ => None,
+        };
+    }
+    None
 }
 
 fn extract_env_value(text: &str, key: &str) -> Option<String> {
@@ -583,6 +701,21 @@ fn find_json_string<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a s
         }
         serde_json::Value::Array(values) => {
             values.iter().find_map(|value| find_json_string(value, key))
+        }
+        _ => None,
+    }
+}
+
+fn find_json_bool(value: &serde_json::Value, key: &str) -> Option<bool> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(value) = object.get(key).and_then(serde_json::Value::as_bool) {
+                return Some(value);
+            }
+            object.values().find_map(|value| find_json_bool(value, key))
+        }
+        serde_json::Value::Array(values) => {
+            values.iter().find_map(|value| find_json_bool(value, key))
         }
         _ => None,
     }
@@ -708,6 +841,7 @@ impl RunOutput {
 
 trait Runner {
     fn run(&mut self, invocation: &Invocation) -> io::Result<RunOutput>;
+    fn read_to_string(&mut self, path: &Path) -> io::Result<String>;
 }
 
 struct SystemRunner;
@@ -738,6 +872,10 @@ impl Runner for SystemRunner {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+
+    fn read_to_string(&mut self, path: &Path) -> io::Result<String> {
+        std::fs::read_to_string(path)
     }
 }
 
@@ -800,20 +938,28 @@ mod tests {
         }
     }
 
-    fn hermes_config(full_control: bool) -> RunOutput {
+    const HERMES_CONFIG_PATH: &str = "/home/test/.hermes/config.yaml";
+
+    fn hermes_config_with_enabled(full_control: bool, enabled: bool) -> String {
         let full_control = if full_control {
             "\n      HERDR_MCP_FULL_CONTROL: '1'"
         } else {
             ""
         };
-        success(format!(
-            "model: test\nmcp_servers:\n  herdr:\n    command: /opt/herdr/bin/herdr\n    args: [mcp, serve]\n    env:\n      HERDR_SESSION: team-a\n      HERDR_MCP_MANAGED: '1'{full_control}\n  other:\n    command: other"
-        ))
+        format!(
+            "model: test\nmcp_servers:\n  herdr:\n    command: /opt/herdr/bin/herdr\n    args: [mcp, serve]\n    env:\n      HERDR_SESSION: team-a\n      HERDR_MCP_MANAGED: '1'{full_control}\n    enabled: {enabled}\n  other:\n    command: other"
+        )
+    }
+
+    fn hermes_config(full_control: bool) -> String {
+        hermes_config_with_enabled(full_control, true)
     }
 
     struct FakeRunner {
         outputs: VecDeque<RunOutput>,
         invocations: Vec<Invocation>,
+        file_reads: VecDeque<(PathBuf, String)>,
+        reads: Vec<PathBuf>,
     }
 
     impl FakeRunner {
@@ -821,7 +967,23 @@ mod tests {
             Self {
                 outputs: outputs.into_iter().collect(),
                 invocations: Vec::new(),
+                file_reads: VecDeque::new(),
+                reads: Vec::new(),
             }
+        }
+
+        fn with_file_reads(
+            mut self,
+            path: impl Into<PathBuf>,
+            contents: impl IntoIterator<Item = String>,
+        ) -> Self {
+            let path = path.into();
+            self.file_reads.extend(
+                contents
+                    .into_iter()
+                    .map(|contents| (path.clone(), contents)),
+            );
+            self
         }
     }
 
@@ -832,6 +994,27 @@ mod tests {
                 .outputs
                 .pop_front()
                 .expect("test did not provide a command result"))
+        }
+
+        fn read_to_string(&mut self, path: &Path) -> io::Result<String> {
+            self.reads.push(path.to_path_buf());
+            let Some((expected_path, contents)) = self.file_reads.pop_front() else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "test did not provide a file read",
+                ));
+            };
+            if expected_path != path {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "test expected a read from '{}', got '{}'",
+                        expected_path.display(),
+                        path.display()
+                    ),
+                ));
+            }
+            Ok(contents)
         }
     }
 
@@ -931,8 +1114,9 @@ mod tests {
             hermes_list(false),
             success("saved"),
             hermes_list(true),
-            hermes_config(false),
-        ]);
+            success(HERMES_CONFIG_PATH),
+        ])
+        .with_file_reads(HERMES_CONFIG_PATH, [hermes_config(false)]);
 
         let outcome = install_with_runner(Client::Hermes, &context(false), &mut runner).unwrap();
 
@@ -947,25 +1131,31 @@ mod tests {
                 "herdr",
                 "--command",
                 "/opt/herdr/bin/herdr",
-                "--args",
-                "mcp",
-                "serve",
                 "--env",
                 "HERDR_SESSION=team-a",
                 "HERDR_MCP_MANAGED=1",
+                "--args",
+                "mcp",
+                "serve",
             ]
         );
+        assert_eq!(runner.invocations[3].args, ["config", "path"]);
+        assert_eq!(runner.reads, [PathBuf::from(HERMES_CONFIG_PATH)]);
     }
 
     #[test]
     fn hermes_managed_update_confirms_replacement() {
         let mut runner = FakeRunner::new([
             hermes_list(true),
-            hermes_config(false),
+            success(HERMES_CONFIG_PATH),
             success("saved"),
             hermes_list(true),
-            hermes_config(true),
-        ]);
+            success(HERMES_CONFIG_PATH),
+        ])
+        .with_file_reads(
+            HERMES_CONFIG_PATH,
+            [hermes_config(false), hermes_config(true)],
+        );
 
         let outcome = install_with_runner(Client::Hermes, &context(true), &mut runner).unwrap();
 
@@ -980,13 +1170,73 @@ mod tests {
     fn hermes_probe_that_does_not_save_is_an_install_failure() {
         let mut runner = FakeRunner::new([
             hermes_list(false),
-            success("Connection failed; not saving."),
+            success("Failed to connect: MCP call timed out after 30.0s\nNot saved."),
             hermes_list(false),
         ]);
 
         let error = install_with_runner(Client::Hermes, &context(false), &mut runner).unwrap_err();
 
         assert!(error.to_string().contains("did not save"));
+        assert!(error.to_string().contains("timed out after 30.0s"));
+    }
+
+    #[test]
+    fn hermes_disabled_managed_entry_is_unusable_but_removable() {
+        let mut install_runner = FakeRunner::new([
+            hermes_list(false),
+            success("Saved disabled"),
+            hermes_list(true),
+            success(HERMES_CONFIG_PATH),
+        ])
+        .with_file_reads(
+            HERMES_CONFIG_PATH,
+            [hermes_config_with_enabled(false, false)],
+        );
+
+        let error =
+            install_with_runner(Client::Hermes, &context(false), &mut install_runner).unwrap_err();
+        assert!(error.to_string().contains("it is disabled"));
+
+        let mut uninstall_runner = FakeRunner::new([
+            hermes_list(true),
+            success(HERMES_CONFIG_PATH),
+            success("removed"),
+            hermes_list(false),
+        ])
+        .with_file_reads(
+            HERMES_CONFIG_PATH,
+            [hermes_config_with_enabled(false, false)],
+        );
+        assert_eq!(
+            uninstall_with_runner(Client::Hermes, &mut uninstall_runner).unwrap(),
+            UninstallOutcome::Removed
+        );
+    }
+
+    #[test]
+    fn hermes_config_path_and_read_errors_are_contextual() {
+        let mut empty_path_runner = FakeRunner::new([hermes_list(true), success("  \n")]);
+        let error = inspect(Client::Hermes, &mut empty_path_runner).unwrap_err();
+        assert!(error.to_string().contains("empty configuration path"));
+        assert!(error.to_string().contains("hermes config path"));
+
+        let mut unreadable_runner =
+            FakeRunner::new([hermes_list(true), success(HERMES_CONFIG_PATH)]);
+        let error = inspect(Client::Hermes, &mut unreadable_runner).unwrap_err();
+        assert!(error.to_string().contains(HERMES_CONFIG_PATH));
+        assert!(error.to_string().contains("could not be read"));
+    }
+
+    #[test]
+    fn hermes_foreign_entry_is_not_replaced() {
+        let foreign_config = "mcp_servers:\n  herdr:\n    command: /usr/bin/foreign\n    args: [serve]\n    enabled: true".to_string();
+        let mut runner = FakeRunner::new([hermes_list(true), success(HERMES_CONFIG_PATH)])
+            .with_file_reads(HERMES_CONFIG_PATH, [foreign_config]);
+
+        let outcome = install_with_runner(Client::Hermes, &context(false), &mut runner).unwrap();
+
+        assert_eq!(outcome, InstallOutcome::Conflict);
+        assert_eq!(runner.invocations.len(), 2);
     }
 
     #[test]
