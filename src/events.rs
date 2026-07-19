@@ -77,7 +77,18 @@ pub struct RemoteAgentStartResult {
 #[derive(Debug)]
 pub struct RemoteReacquireResult {
     pub record: crate::remote_resume::ResumeRecord,
-    pub result: Result<crate::remote_agent::RemoteAgentStart, String>,
+    pub generation: u64,
+    pub request_token: Option<u64>,
+    pub result: Result<crate::remote_agent::RemoteAgentStart, RemoteReacquireFailure>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum RemoteReacquireFailure {
+    Cancelled,
+    TimedOut { message: String },
+    Retryable { message: String },
+    Ended { message: String },
 }
 
 /// A batch of re-acquire attempts (one peer) completed outside the app loop.
@@ -88,7 +99,37 @@ pub struct RemoteReacquireResult {
 pub struct RemoteReacquireBatch {
     pub peer_id: String,
     pub results: Vec<RemoteReacquireResult>,
+    /// Kept for shutdown compatibility with legacy one-batch resume callers.
+    /// New requests aggregate by `request_token` in `App` instead.
     pub respond_to: Option<(String, std::sync::mpsc::Sender<String>)>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct RemoteParkedTerminateResult {
+    pub remote_terminal_id: String,
+    pub result: Result<(), String>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct RemoteOrphanInventoryResult {
+    pub peer_id: String,
+    pub result: Result<Vec<crate::api::schema::TerminalParkedInfo>, String>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct RemoteOrphanResolveResult {
+    pub entry: crate::app::state::OrphanReviewEntry,
+    pub result: Result<RemoteOrphanResolveOutcome, String>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum RemoteOrphanResolveOutcome {
+    Resolved,
+    Promoted(Box<crate::remote_agent::RemoteAgentStart>),
 }
 
 #[derive(Debug)]
@@ -200,6 +241,13 @@ pub enum AppEvent {
     /// Remote pane re-acquire attempts completed outside the app loop.
     #[cfg(unix)]
     RemoteReacquireFinished(Box<RemoteReacquireBatch>),
+    /// Best-effort cleanup requested by closing a restore reservation.
+    #[cfg(unix)]
+    RemoteParkedTerminateFinished(RemoteParkedTerminateResult),
+    #[cfg(unix)]
+    RemoteOrphanInventoryFinished(RemoteOrphanInventoryResult),
+    #[cfg(unix)]
+    RemoteOrphanResolveFinished(RemoteOrphanResolveResult),
     /// A peer-routed agent operation completed outside the app loop.
     PeerAgentRequestFinished(Box<PeerAgentRequestResult>),
     /// A peer health operation completed outside the app loop.

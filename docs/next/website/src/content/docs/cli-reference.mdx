@@ -113,10 +113,11 @@ herdr notification show <title> [--body TEXT] [--position top-left|top-right|bot
 herdr session list [--json]
 herdr session attach <name>
 herdr session stop <name> [--json]
-herdr session delete <name> [--json]
+herdr session delete <name> [--force] [--json]
 ```
 
 Use `default` as the session name when you need to stop the default session explicitly.
+Session deletion refuses to discard parked-terminal recovery tickets. `--force` is destructive: it deletes those tickets, reports how many remote terminals may remain hidden as orphans, and relies on the later orphan review to retain, terminate, or promote them.
 
 ## Workspaces
 
@@ -303,6 +304,9 @@ herdr terminal attach <terminal_id> [--takeover]
 herdr terminal shell [--label LABEL]
 herdr terminal session control <target> [--takeover] [--cols N] [--rows N]
 herdr terminal session observe <target> [--cols N] [--rows N]
+herdr terminal parked list [--json]
+herdr terminal parked promote <park_id>
+herdr terminal parked terminate <park_id>
 herdr terminal title set <title>
 herdr terminal title clear
 ```
@@ -324,6 +328,7 @@ records with base64-encoded ANSI bytes, then a `terminal.closed` record when
 the server closes the stream. Multiple observers can watch the same terminal
 without taking input, resize, scroll, or takeover authority.
 `terminal title clear` restores Herdr's default outer terminal window title.
+`terminal parked` is a local administrative view of live PTYs that are intentionally hidden from this server's workspaces. `promote` moves one into a visible workspace in the current session; `terminate` stops it permanently.
 
 ## Peers
 

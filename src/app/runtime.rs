@@ -213,6 +213,10 @@ impl App {
         changed |= self.expire_incoming_peer_leases(now);
         changed |= self.expire_remote_owner_leases(now);
         changed |= self.expire_remote_presentations(now);
+        #[cfg(unix)]
+        {
+            changed |= self.expire_remote_restore_queue(now);
+        }
 
         if now >= self.next_resize_poll {
             resized = self.handle_resize_poll();

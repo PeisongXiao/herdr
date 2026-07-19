@@ -173,6 +173,12 @@ impl App {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        #[cfg(unix)]
+        for pane_id in &pane_ids {
+            if let Err(message) = self.discard_remote_restore_for_pane(*pane_id) {
+                return encode_error(id, "terminal_recovery_discard_failed", message);
+            }
+        }
         self.state.selected = index;
         self.state.close_selected_workspace();
         self.state.remove_plugin_pane_records(pane_ids);

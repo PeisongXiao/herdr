@@ -1524,6 +1524,14 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
             return Err(pane_not_found(id, &target.pane_id));
         };
+        #[cfg(unix)]
+        if let Err(message) = self.discard_remote_restore_for_pane(pane_id) {
+            return Err(encode_error(
+                id,
+                "terminal_recovery_discard_failed",
+                message,
+            ));
+        }
         let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return Err(pane_not_found(id, &target.pane_id));
         };

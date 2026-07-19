@@ -208,6 +208,8 @@ impl App {
         }
         self.state.peers.insert(peer.id.clone(), peer.clone());
         self.start_peer_refresh(peer.clone());
+        #[cfg(unix)]
+        self.discover_remote_parked_terminals(peer.clone());
         self.state.mark_session_dirty();
         let response = encode_success(
             id,
@@ -313,6 +315,8 @@ impl App {
         }
         self.state.peers.insert(peer.id.clone(), peer.clone());
         self.start_peer_refresh(peer.clone());
+        #[cfg(unix)]
+        self.discover_remote_parked_terminals(peer.clone());
         self.state.mark_session_dirty();
         encode_success(
             id,

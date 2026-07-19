@@ -105,10 +105,11 @@ herdr notification show <title> [--body TEXT] [--position top-left|top-right|bot
 herdr session list [--json]
 herdr session attach <name>
 herdr session stop <name> [--json]
-herdr session delete <name> [--json]
+herdr session delete <name> [--force] [--json]
 ```
 
 需要显式停止默认会话时,把会话名写成 `default`。
+存在 parked terminal 恢复票据时,普通 session delete 会拒绝执行。`--force` 会破坏性地丢弃票据,并报告可能成为隐藏 orphan 的远程终端数量。
 
 ## 工作区
 
@@ -277,6 +278,9 @@ herdr terminal attach <terminal_id> [--takeover]
 herdr terminal shell [--label LABEL]
 herdr terminal session control <target> [--takeover] [--cols N] [--rows N]
 herdr terminal session observe <target> [--cols N] [--rows N]
+herdr terminal parked list [--json]
+herdr terminal parked promote <park_id>
+herdr terminal parked terminate <park_id>
 herdr terminal title set <title>
 herdr terminal title clear
 ```
@@ -284,6 +288,7 @@ herdr terminal title clear
 从直接附加中用 `ctrl+b q` 分离。用 `ctrl+b ctrl+b` 发送字面的 `ctrl+b`。
 `terminal shell` 用调用者的当前目录和环境创建服务器所有的 shell 标签页,移除 Herdr 内部路由变量,再附加到它。托管窗格 SSH 则先准备独占 terminal delegation,并通过 `terminal attach` 原子提交。
 `terminal title clear` 恢复 Herdr 默认的外层终端窗口标题。
+`terminal parked` 是隐藏 live PTY 的本地管理视图。`promote` 将其放入当前 session 的可见工作区,`terminate` 则永久终止它。
 
 ## Peers
 

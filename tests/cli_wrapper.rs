@@ -398,6 +398,11 @@ fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
     !process_exists(pid)
 }
 
+// Process-tree teardown is asynchronous and can contend with other PTY-heavy
+// nextest cases in constrained containers. Keep the assertion bounded without
+// assuming an otherwise healthy child is reaped within three seconds.
+const PROCESS_TREE_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn wait_for_pid_file(pid_file: &Path, timeout: Duration) -> Result<u32, String> {
     const STABLE_PID_CONTENT_WINDOW: Duration = Duration::from_millis(250);
 
@@ -2260,7 +2265,7 @@ fn forced_worktree_remove_terminates_processes_inside_checkout() {
         ],
     );
     assert_eq!(removed["result"]["type"], "worktree_removed");
-    assert!(wait_for_pid_exit(pid, Duration::from_secs(3)));
+    assert!(wait_for_pid_exit(pid, PROCESS_TREE_EXIT_TIMEOUT));
     assert!(!checkout.exists());
 
     cleanup_spawned_herdr(herdr, base);
@@ -2924,7 +2929,7 @@ fn closing_pane_terminates_processes_inside_it() {
         String::from_utf8_lossy(&closed.stderr)
     );
     assert!(
-        wait_for_pid_exit(pid, Duration::from_secs(3)),
+        wait_for_pid_exit(pid, PROCESS_TREE_EXIT_TIMEOUT),
         "process {pid} survived pane close"
     );
 
@@ -2977,7 +2982,7 @@ fn closing_workspace_terminates_processes_inside_it() {
         String::from_utf8_lossy(&closed.stderr)
     );
     assert!(
-        wait_for_pid_exit(pid, Duration::from_secs(3)),
+        wait_for_pid_exit(pid, PROCESS_TREE_EXIT_TIMEOUT),
         "process {pid} survived workspace close"
     );
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::agents::AgentAttachInfo;
+use super::agents::{AgentAttachInfo, AgentInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalPresentationOwner {
@@ -34,8 +34,10 @@ pub struct TerminalDelegationInfo {
 pub enum TerminalDelegationStatus {
     Pending,
     Active,
+    Parked,
     TakenOver,
     HandedOff,
+    Promoted,
     Terminated,
     Failed,
 }
@@ -70,6 +72,160 @@ pub struct TerminalDelegationTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalDelegateHandoffParams {
     pub pane_id: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TerminalDelegateParkParams {
+    pub target: TerminalDelegationTarget,
+    pub park_id: String,
+    pub origin_id: String,
+    pub resume_token: String,
+    pub discovery_token: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TerminalParkedTarget {
+    pub park_id: String,
+    pub origin_id: String,
+    pub resume_token: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TerminalParkedResumeParams {
+    #[serde(flatten)]
+    pub target: TerminalParkedTarget,
+    pub owner: TerminalPresentationOwner,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TerminalParkedListParams {
+    pub origin_id: String,
+    pub discovery_token: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalParkedResolveAction {
+    Retain,
+    Terminate,
+    Promote,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TerminalParkedResolveParams {
+    pub park_id: String,
+    pub origin_id: String,
+    pub discovery_token: String,
+    pub action: TerminalParkedResolveAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<TerminalPresentationOwner>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TerminalParkedAdminListParams {
+    pub admin_token: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TerminalParkedAdminResolveParams {
+    pub park_id: String,
+    pub admin_token: String,
+    pub action: TerminalParkedResolveAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TerminalParkedInfo {
+    pub park_id: String,
+    pub terminal_id: String,
+    pub pane_id: String,
+    pub origin_id: String,
+    pub status: TerminalDelegationStatus,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub resuming: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TerminalParkedResumePrepared {
+    pub delegation: TerminalDelegationInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentInfo>,
+}
+
+impl std::fmt::Debug for TerminalDelegateParkParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalDelegateParkParams")
+            .field("target", &self.target)
+            .field("park_id", &self.park_id)
+            .field("origin_id", &self.origin_id)
+            .field("resume_token", &"[redacted]")
+            .field("discovery_token", &"[redacted]")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TerminalParkedTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalParkedTarget")
+            .field("park_id", &self.park_id)
+            .field("origin_id", &self.origin_id)
+            .field("resume_token", &"[redacted]")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TerminalParkedResumeParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalParkedResumeParams")
+            .field("target", &self.target)
+            .field("owner", &self.owner)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TerminalParkedListParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalParkedListParams")
+            .field("origin_id", &self.origin_id)
+            .field("discovery_token", &"[redacted]")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TerminalParkedResolveParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalParkedResolveParams")
+            .field("park_id", &self.park_id)
+            .field("origin_id", &self.origin_id)
+            .field("discovery_token", &"[redacted]")
+            .field("action", &self.action)
+            .field("owner", &self.owner)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TerminalParkedAdminListParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalParkedAdminListParams")
+            .field("admin_token", &"[redacted]")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TerminalParkedAdminResolveParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalParkedAdminResolveParams")
+            .field("park_id", &self.park_id)
+            .field("admin_token", &"[redacted]")
+            .field("action", &self.action)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

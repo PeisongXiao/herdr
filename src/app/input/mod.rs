@@ -71,6 +71,62 @@ use super::App;
 impl App {
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
         let key_event = key.as_key_event();
+        #[cfg(unix)]
+        if let Some(review) = self.state.orphan_review.as_mut() {
+            match key_event.code {
+                KeyCode::Esc => self.state.orphan_review = None,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    review.selected = review.selected.saturating_sub(1);
+                    review.error = None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    review.selected = review
+                        .selected
+                        .saturating_add(1)
+                        .min(review.entries.len().saturating_sub(1));
+                    review.error = None;
+                }
+                KeyCode::Char('r' | 'R') if review.pending_action.is_none() => {
+                    self.handle_orphan_review_action(crate::app::state::OrphanReviewAction::Retain);
+                }
+                KeyCode::Char('t' | 'T') if review.pending_action.is_none() => {
+                    self.handle_orphan_review_action(
+                        crate::app::state::OrphanReviewAction::Terminate,
+                    );
+                }
+                KeyCode::Char('p' | 'P') if review.pending_action.is_none() => {
+                    self.handle_orphan_review_action(
+                        crate::app::state::OrphanReviewAction::Promote,
+                    );
+                }
+                _ => {}
+            }
+            return;
+        }
+        #[cfg(unix)]
+        if self.state.mode == Mode::Terminal {
+            let action = match key_event.code {
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    Some(crate::app::remote_resume::RemoteRestorePanelAction::Retry)
+                }
+                KeyCode::Char('c') | KeyCode::Char('C') => {
+                    Some(crate::app::remote_resume::RemoteRestorePanelAction::Close)
+                }
+                _ => None,
+            };
+            if let Some(action) = action {
+                if let Some(pane_id) = self
+                    .state
+                    .active
+                    .and_then(|ws_idx| self.state.workspaces.get(ws_idx)?.focused_pane_id())
+                {
+                    if self.state.remote_restore_panels.contains_key(&pane_id) {
+                        self.handle_remote_restore_panel_action(pane_id, action);
+                        return;
+                    }
+                }
+            }
+        }
         if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
             if let Some(text) = crate::platform::read_clipboard_text() {
                 self.paste_into_active_text_input(&text);
@@ -308,6 +364,14 @@ impl App {
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }
                     MouseAction::FocusToastTarget => self.focus_toast_target_via_api(),
+                    #[cfg(unix)]
+                    MouseAction::RemoteRestore { pane_id, action } => {
+                        self.handle_remote_restore_panel_action(pane_id, action)
+                    }
+                    #[cfg(unix)]
+                    MouseAction::OrphanReview(action) => {
+                        self.handle_orphan_review_action(action);
+                    }
                     MouseAction::MoveWorkspace {
                         source_ws_idx,
                         insert_idx,

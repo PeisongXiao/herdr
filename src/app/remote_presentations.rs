@@ -3,9 +3,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use sha2::{Digest as _, Sha256};
+
 use crate::api::schema::{
-    ErrorBody, TerminalDelegateClaimParams, TerminalDelegateCreateParams, TerminalDelegationClaim,
-    TerminalDelegationInfo, TerminalDelegationStatus,
+    ErrorBody, TerminalDelegateClaimParams, TerminalDelegateCreateParams,
+    TerminalDelegateParkParams, TerminalDelegationClaim, TerminalDelegationInfo,
+    TerminalDelegationStatus, TerminalParkedInfo, TerminalParkedListParams,
+    TerminalParkedResolveParams, TerminalParkedResumeParams, TerminalParkedTarget,
 };
 use crate::layout::PaneId;
 use crate::terminal::TerminalId;
@@ -39,6 +43,9 @@ enum PendingDelegationSource {
     Takeover {
         previous_delegation_id: String,
     },
+    Parked {
+        park_id: String,
+    },
 }
 
 pub(crate) struct DelegatedPane {
@@ -47,6 +54,20 @@ pub(crate) struct DelegatedPane {
     pub(crate) public_pane_id: String,
     pub(crate) public_workspace_id: String,
     pub(crate) public_tab_id: String,
+    recovery: Option<ParkedRecovery>,
+}
+
+#[derive(Clone)]
+struct ParkedRecovery {
+    park_id: String,
+    origin_id: String,
+    resume_token_hash: [u8; 32],
+    discovery_token_hash: [u8; 32],
+}
+
+pub(crate) struct ParkedPane {
+    delegated: DelegatedPane,
+    lease_delegation_id: Option<String>,
 }
 
 pub(crate) struct CompletedTerminalDelegation {
@@ -58,6 +79,7 @@ pub(crate) struct CompletedTerminalDelegation {
 pub(crate) struct RemotePresentationState {
     pub(crate) pending: HashMap<String, PendingTerminalDelegation>,
     pub(crate) active: HashMap<String, DelegatedPane>,
+    pub(crate) parked: HashMap<String, ParkedPane>,
     pub(crate) completed: HashMap<String, CompletedTerminalDelegation>,
 }
 
@@ -284,6 +306,22 @@ impl App {
                 .active
                 .get(previous_delegation_id)
                 .is_some_and(|delegated| delegated.info.terminal_id == requested_terminal_id),
+            PendingDelegationSource::Parked { park_id } => {
+                self.remote_presentations
+                    .parked
+                    .get(park_id)
+                    .is_some_and(|parked| {
+                        parked.lease_delegation_id.as_deref() == Some(claim.delegation_id.as_str())
+                            && parked.delegated.info.terminal_id == requested_terminal_id
+                            && self.state.terminals.contains_key(
+                                &parked.delegated.moved.pane_state.attached_terminal_id,
+                            )
+                            && self
+                                .terminal_runtimes
+                                .get(&parked.delegated.moved.pane_state.attached_terminal_id)
+                                .is_some()
+                    })
+            }
         };
         if !source_available {
             self.fail_pending_delegation(pending);
@@ -301,20 +339,30 @@ impl App {
                         &delegated.moved.pane_state.attached_terminal_id,
                     )
                 }),
-            PendingDelegationSource::New { .. } | PendingDelegationSource::Existing { .. } => false,
+            PendingDelegationSource::New { .. }
+            | PendingDelegationSource::Existing { .. }
+            | PendingDelegationSource::Parked { .. } => false,
         };
         if takeover_has_downstream_presentation {
             self.fail_pending_delegation(pending);
             return Err("this pane started owning a deeper remote presentation before takeover committed; hand that presentation back or close it before retrying".into());
         }
 
-        let (moved, public_pane_id, public_workspace_id, public_tab_id) = match pending.source {
+        let (moved, public_pane_id, public_workspace_id, public_tab_id, recovery) = match pending
+            .source
+        {
             PendingDelegationSource::New {
                 moved,
                 public_pane_id,
                 public_workspace_id,
                 public_tab_id,
-            } => (moved, public_pane_id, public_workspace_id, public_tab_id),
+            } => (
+                moved,
+                public_pane_id,
+                public_workspace_id,
+                public_tab_id,
+                None,
+            ),
             PendingDelegationSource::Existing {
                 pane_id,
                 public_pane_id,
@@ -325,7 +373,13 @@ impl App {
                 let Some(moved) = self.take_active_pane_for_delegation(pane_id) else {
                     return Err("source pane disappeared before delegation committed".into());
                 };
-                (moved, public_pane_id, public_workspace_id, public_tab_id)
+                (
+                    moved,
+                    public_pane_id,
+                    public_workspace_id,
+                    public_tab_id,
+                    None,
+                )
             }
             PendingDelegationSource::Takeover {
                 previous_delegation_id,
@@ -356,6 +410,32 @@ impl App {
                     previous.public_pane_id,
                     previous.public_workspace_id,
                     previous.public_tab_id,
+                    previous.recovery,
+                )
+            }
+            PendingDelegationSource::Parked { park_id } => {
+                let Some(parked) = self.remote_presentations.parked.remove(&park_id) else {
+                    return Err("parked terminal disappeared before resume committed".into());
+                };
+                if parked.lease_delegation_id.as_deref() != Some(claim.delegation_id.as_str()) {
+                    self.remote_presentations.parked.insert(park_id, parked);
+                    return Err("parked terminal resume lease changed before commit".into());
+                }
+                let mut previous_info = parked.delegated.info.clone();
+                previous_info.status = TerminalDelegationStatus::TakenOver;
+                self.remote_presentations.completed.insert(
+                    previous_info.delegation_id.clone(),
+                    CompletedTerminalDelegation {
+                        info: previous_info,
+                        completed_at: Instant::now(),
+                    },
+                );
+                (
+                    parked.delegated.moved,
+                    parked.delegated.public_pane_id,
+                    parked.delegated.public_workspace_id,
+                    parked.delegated.public_tab_id,
+                    parked.delegated.recovery,
                 )
             }
         };
@@ -372,6 +452,7 @@ impl App {
                 public_pane_id,
                 public_workspace_id,
                 public_tab_id,
+                recovery,
             },
         );
         self.state
@@ -425,6 +506,13 @@ impl App {
             .pending
             .get(delegation_id)
             .map(|pending| &pending.info)
+            .or_else(|| {
+                self.remote_presentations
+                    .parked
+                    .values()
+                    .find(|parked| parked.delegated.info.delegation_id == delegation_id)
+                    .map(|parked| &parked.delegated.info)
+            })
             .or_else(|| {
                 self.remote_presentations
                     .active
@@ -534,6 +622,452 @@ impl App {
         Ok(info)
     }
 
+    pub(crate) fn park_terminal_delegation(
+        &mut self,
+        params: TerminalDelegateParkParams,
+    ) -> Result<TerminalParkedInfo, ErrorBody> {
+        let recovery = ParkedRecovery::from_park_params(&params)?;
+        if let Some(parked) = self.remote_presentations.parked.get(&params.park_id) {
+            authorize_recovery(&parked.delegated, &recovery)?;
+            if parked.delegated.info.delegation_id != params.target.delegation_id
+                || parked.delegated.info.epoch != params.target.epoch
+            {
+                return Err(parked_not_found());
+            }
+            return Ok(parked_info(parked));
+        }
+
+        let Some(delegation_id) =
+            self.remote_presentations
+                .active
+                .iter()
+                .find_map(|(delegation_id, delegated)| {
+                    (delegated.info.delegation_id == params.target.delegation_id
+                        && delegated.info.epoch == params.target.epoch)
+                        .then(|| delegation_id.clone())
+                })
+        else {
+            return Err(parked_not_found());
+        };
+        let Some(mut delegated) = self.remote_presentations.active.remove(&delegation_id) else {
+            return Err(parked_not_found());
+        };
+        if let Some(existing) = delegated.recovery.as_ref() {
+            if !same_recovery(existing, &recovery) {
+                self.remote_presentations
+                    .active
+                    .insert(delegation_id, delegated);
+                return Err(parked_unauthorized());
+            }
+        } else {
+            delegated.recovery = Some(recovery);
+        }
+        delegated.info.status = TerminalDelegationStatus::Parked;
+        let parked = ParkedPane {
+            delegated,
+            lease_delegation_id: None,
+        };
+        let info = parked_info(&parked);
+        self.remote_presentations
+            .parked
+            .insert(params.park_id, parked);
+        self.state.mark_session_dirty();
+        Ok(info)
+    }
+
+    pub(crate) fn parked_terminal_status(
+        &self,
+        target: &TerminalParkedTarget,
+    ) -> Result<TerminalParkedInfo, ErrorBody> {
+        validate_parked_target(target)?;
+        let resume_hash = hash_secret(&target.resume_token);
+        if let Some(parked) = self.remote_presentations.parked.get(&target.park_id) {
+            authorize_resume(&parked.delegated, &target.origin_id, &resume_hash)?;
+            return Ok(parked_info(parked));
+        }
+        if let Some(delegated) = self.remote_presentations.active.values().find(|delegated| {
+            delegated
+                .recovery
+                .as_ref()
+                .is_some_and(|recovery| recovery.park_id == target.park_id)
+        }) {
+            authorize_resume(delegated, &target.origin_id, &resume_hash)?;
+            return Ok(active_parked_info(delegated));
+        }
+        Err(parked_not_found())
+    }
+
+    pub(crate) fn prepare_parked_terminal_resume(
+        &mut self,
+        params: TerminalParkedResumeParams,
+    ) -> Result<TerminalDelegationInfo, ErrorBody> {
+        validate_parked_target(&params.target)?;
+        let resume_hash = hash_secret(&params.target.resume_token);
+        let parked = self
+            .remote_presentations
+            .parked
+            .get(&params.target.park_id)
+            .ok_or_else(parked_not_found)?;
+        authorize_resume(&parked.delegated, &params.target.origin_id, &resume_hash)?;
+        self.prepare_parked_terminal_resume_authorized(&params.target.park_id, params.owner)
+    }
+
+    fn prepare_parked_terminal_resume_with_discovery(
+        &mut self,
+        params: &TerminalParkedResolveParams,
+        owner: crate::api::schema::TerminalPresentationOwner,
+    ) -> Result<TerminalDelegationInfo, ErrorBody> {
+        self.authorize_discovery(&params.park_id, &params.origin_id, &params.discovery_token)?;
+        self.prepare_parked_terminal_resume_authorized(&params.park_id, owner)
+    }
+
+    fn prepare_parked_terminal_resume_authorized(
+        &mut self,
+        park_id: &str,
+        owner: crate::api::schema::TerminalPresentationOwner,
+    ) -> Result<TerminalDelegationInfo, ErrorBody> {
+        let origin_peer_id = crate::remote_agent::local_peer_id();
+        validate_owner_route(&owner, &origin_peer_id)?;
+        let parked = self
+            .remote_presentations
+            .parked
+            .get(park_id)
+            .ok_or_else(parked_not_found)?;
+        if let Some(lease_id) = parked.lease_delegation_id.as_ref() {
+            let pending = self.remote_presentations.pending.get(lease_id);
+            if let Some(pending) = pending.filter(|pending| pending.info.owner == owner) {
+                return Ok(pending.info.clone());
+            }
+            return Err(parked_busy());
+        }
+        let terminal_id = parked
+            .delegated
+            .moved
+            .pane_state
+            .attached_terminal_id
+            .clone();
+        if !self.state.terminals.contains_key(&terminal_id)
+            || self.terminal_runtimes.get(&terminal_id).is_none()
+        {
+            return Err(ErrorBody {
+                code: "terminal_parked_gone".into(),
+                message: "the parked terminal process is no longer running".into(),
+            });
+        }
+        let info = new_delegation_info(
+            &terminal_id,
+            &parked.delegated.public_pane_id,
+            owner,
+            origin_peer_id,
+        );
+        let delegation_id = info.delegation_id.clone();
+        self.remote_presentations.pending.insert(
+            delegation_id.clone(),
+            PendingTerminalDelegation {
+                info: info.clone(),
+                source: PendingDelegationSource::Parked {
+                    park_id: park_id.to_string(),
+                },
+                created_at: Instant::now(),
+            },
+        );
+        self.remote_presentations
+            .parked
+            .get_mut(park_id)
+            .expect("parked terminal checked above")
+            .lease_delegation_id = Some(delegation_id);
+        Ok(info)
+    }
+
+    pub(crate) fn list_parked_terminals(
+        &self,
+        params: &TerminalParkedListParams,
+    ) -> Result<Vec<TerminalParkedInfo>, ErrorBody> {
+        validate_discovery_input(&params.origin_id, &params.discovery_token)?;
+        let discovery_hash = hash_secret(&params.discovery_token);
+        let mut origin_found = false;
+        let mut parked = self
+            .remote_presentations
+            .parked
+            .values()
+            .filter_map(|candidate| {
+                let recovery = candidate.delegated.recovery.as_ref()?;
+                if recovery.origin_id != params.origin_id {
+                    return None;
+                }
+                origin_found = true;
+                secret_hash_matches(&recovery.discovery_token_hash, &discovery_hash)
+                    .then(|| parked_info(candidate))
+            })
+            .collect::<Vec<_>>();
+        if origin_found && parked.is_empty() {
+            return Err(parked_unauthorized());
+        }
+        parked.sort_by(|left, right| left.park_id.cmp(&right.park_id));
+        Ok(parked)
+    }
+
+    /// In-process inventory for the owning server's TUI. Remote callers must
+    /// use the credentialed JSON list method instead.
+    pub(crate) fn parked_terminal_inventory(&self) -> Vec<TerminalParkedInfo> {
+        let mut parked = self
+            .remote_presentations
+            .parked
+            .values()
+            .map(parked_info)
+            .collect::<Vec<_>>();
+        parked.sort_by(|left, right| left.park_id.cmp(&right.park_id));
+        parked
+    }
+
+    pub(crate) fn retain_parked_terminal(
+        &mut self,
+        params: &TerminalParkedResolveParams,
+    ) -> Result<TerminalParkedInfo, ErrorBody> {
+        self.authorize_discovery(&params.park_id, &params.origin_id, &params.discovery_token)?;
+        self.retain_parked_terminal_admin(&params.park_id)
+    }
+
+    pub(crate) fn retain_parked_terminal_admin(
+        &mut self,
+        park_id: &str,
+    ) -> Result<TerminalParkedInfo, ErrorBody> {
+        if let Some(lease_id) = self
+            .remote_presentations
+            .parked
+            .get(park_id)
+            .and_then(|parked| parked.lease_delegation_id.clone())
+        {
+            if let Some(pending) = self.remote_presentations.pending.remove(&lease_id) {
+                self.fail_pending_delegation(pending);
+            }
+        }
+        if let Some(parked) = self.remote_presentations.parked.get(park_id) {
+            return Ok(parked_info(parked));
+        }
+        let active_id = self.active_delegation_for_park(park_id);
+        let Some(active_id) = active_id else {
+            return Err(parked_not_found());
+        };
+        let delegated = self
+            .remote_presentations
+            .active
+            .remove(&active_id)
+            .ok_or_else(parked_not_found)?;
+        Ok(self.repark_delegated(delegated))
+    }
+
+    pub(crate) fn terminate_parked_terminal(
+        &mut self,
+        params: &TerminalParkedResolveParams,
+    ) -> Result<(), ErrorBody> {
+        self.authorize_discovery(&params.park_id, &params.origin_id, &params.discovery_token)?;
+        self.terminate_parked_terminal_admin(&params.park_id)
+    }
+
+    pub(crate) fn terminate_parked_terminal_admin(
+        &mut self,
+        park_id: &str,
+    ) -> Result<(), ErrorBody> {
+        if let Some(lease_id) = self
+            .remote_presentations
+            .parked
+            .get(park_id)
+            .and_then(|parked| parked.lease_delegation_id.clone())
+        {
+            if let Some(pending) = self.remote_presentations.pending.remove(&lease_id) {
+                self.fail_pending_delegation(pending);
+            }
+        }
+        if let Some(parked) = self.remote_presentations.parked.remove(park_id) {
+            self.terminate_delegated_pane(parked.delegated);
+            return Ok(());
+        }
+        let Some(active_id) = self.active_delegation_for_park(park_id) else {
+            return Err(parked_not_found());
+        };
+        let claim = self
+            .remote_presentations
+            .active
+            .get(&active_id)
+            .map(|delegated| TerminalDelegationClaim {
+                delegation_id: delegated.info.delegation_id.clone(),
+                epoch: delegated.info.epoch,
+            })
+            .ok_or_else(parked_not_found)?;
+        if self.terminate_terminal_delegation(&claim) {
+            Ok(())
+        } else {
+            Err(parked_not_found())
+        }
+    }
+
+    pub(crate) fn promote_parked_terminal(
+        &mut self,
+        params: &TerminalParkedResolveParams,
+    ) -> Result<TerminalDelegationInfo, ErrorBody> {
+        self.authorize_discovery(&params.park_id, &params.origin_id, &params.discovery_token)?;
+        if let Some(owner) = params.owner.clone() {
+            return self.prepare_parked_terminal_resume_with_discovery(params, owner);
+        }
+        self.promote_parked_terminal_admin(&params.park_id)
+    }
+
+    pub(crate) fn promote_parked_terminal_admin(
+        &mut self,
+        park_id: &str,
+    ) -> Result<TerminalDelegationInfo, ErrorBody> {
+        let parked = self
+            .remote_presentations
+            .parked
+            .get(park_id)
+            .ok_or_else(parked_not_found)?;
+        if parked.lease_delegation_id.is_some() {
+            return Err(parked_busy());
+        }
+        let parked = self
+            .remote_presentations
+            .parked
+            .remove(park_id)
+            .ok_or_else(parked_not_found)?;
+        let mut delegated = parked.delegated;
+        self.state
+            .delegated_terminal_ids
+            .remove(&delegated.moved.pane_id);
+        let terminal_id = delegated.moved.pane_state.attached_terminal_id.clone();
+        let identity_cwd = self
+            .state
+            .terminals
+            .get(&terminal_id)
+            .map(|terminal| terminal.cwd.clone())
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let tab_label = self
+            .state
+            .terminals
+            .get(&terminal_id)
+            .and_then(|terminal| terminal.manual_label.clone());
+        let pane_id = delegated.moved.pane_id;
+        let workspace = crate::workspace::Workspace::from_existing_pane(
+            None,
+            tab_label,
+            identity_cwd,
+            delegated.moved,
+            self.event_tx.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+        );
+        self.state.workspaces.push(workspace);
+        let ws_idx = self.state.workspaces.len() - 1;
+        self.state
+            .public_pane_id_aliases
+            .insert(delegated.public_pane_id.clone(), pane_id);
+        if self.state.active.is_none() {
+            self.state.active = Some(ws_idx);
+            self.state.selected = ws_idx;
+        }
+        delegated.info.status = TerminalDelegationStatus::Promoted;
+        let info = delegated.info.clone();
+        self.remote_presentations.completed.insert(
+            info.delegation_id.clone(),
+            CompletedTerminalDelegation {
+                info: delegated.info,
+                completed_at: Instant::now(),
+            },
+        );
+        self.state.mark_session_dirty();
+        self.schedule_session_save();
+        Ok(info)
+    }
+
+    fn authorize_discovery(
+        &self,
+        park_id: &str,
+        origin_id: &str,
+        discovery_token: &str,
+    ) -> Result<(), ErrorBody> {
+        validate_discovery_input(origin_id, discovery_token)?;
+        let discovery_hash = hash_secret(discovery_token);
+        let delegated = self
+            .remote_presentations
+            .parked
+            .get(park_id)
+            .map(|parked| &parked.delegated)
+            .or_else(|| {
+                self.remote_presentations.active.values().find(|delegated| {
+                    delegated
+                        .recovery
+                        .as_ref()
+                        .is_some_and(|recovery| recovery.park_id == park_id)
+                })
+            })
+            .ok_or_else(parked_not_found)?;
+        let recovery = delegated.recovery.as_ref().ok_or_else(parked_not_found)?;
+        if recovery.origin_id != origin_id
+            || !secret_hash_matches(&recovery.discovery_token_hash, &discovery_hash)
+        {
+            return Err(parked_unauthorized());
+        }
+        Ok(())
+    }
+
+    fn active_delegation_for_park(&self, park_id: &str) -> Option<String> {
+        self.remote_presentations
+            .active
+            .iter()
+            .find_map(|(delegation_id, delegated)| {
+                delegated
+                    .recovery
+                    .as_ref()
+                    .is_some_and(|recovery| recovery.park_id == park_id)
+                    .then(|| delegation_id.clone())
+            })
+    }
+
+    fn repark_delegated(&mut self, mut delegated: DelegatedPane) -> TerminalParkedInfo {
+        delegated.info.status = TerminalDelegationStatus::Parked;
+        let park_id = delegated
+            .recovery
+            .as_ref()
+            .expect("only recoverable delegations can be reparked")
+            .park_id
+            .clone();
+        let parked = ParkedPane {
+            delegated,
+            lease_delegation_id: None,
+        };
+        let info = parked_info(&parked);
+        self.remote_presentations.parked.insert(park_id, parked);
+        self.state.mark_session_dirty();
+        info
+    }
+
+    fn terminate_delegated_pane(&mut self, mut delegated: DelegatedPane) {
+        let terminal_id = delegated.moved.pane_state.attached_terminal_id.clone();
+        self.release_remote_terminal_bridge(&terminal_id);
+        self.state
+            .delegated_terminal_ids
+            .remove(&delegated.moved.pane_id);
+        self.state
+            .pane_id_aliases
+            .retain(|_, pane_id| *pane_id != delegated.moved.pane_id);
+        self.state
+            .public_pane_id_aliases
+            .retain(|_, pane_id| *pane_id != delegated.moved.pane_id);
+        delegated.info.status = TerminalDelegationStatus::Terminated;
+        self.state.terminals.remove(&terminal_id);
+        if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
+            runtime.shutdown();
+        }
+        self.remote_presentations.completed.insert(
+            delegated.info.delegation_id.clone(),
+            CompletedTerminalDelegation {
+                info: delegated.info,
+                completed_at: Instant::now(),
+            },
+        );
+        self.state.mark_session_dirty();
+    }
+
     pub(crate) fn terminate_terminal_delegation(
         &mut self,
         claim: &TerminalDelegationClaim,
@@ -601,6 +1135,7 @@ impl App {
     pub(crate) fn has_remote_presentation_activity(&self) -> bool {
         !self.remote_presentations.pending.is_empty()
             || !self.remote_presentations.active.is_empty()
+            || !self.remote_presentations.parked.is_empty()
             || !self.remote_owner_presentations.is_empty()
             || !self.pending_owner_activations.is_empty()
             || !self.pending_owner_operations.is_empty()
@@ -615,6 +1150,12 @@ impl App {
                 .values()
                 .map(|delegated| &delegated.moved.pane_state.attached_terminal_id),
         );
+        terminal_ids.extend(
+            self.remote_presentations
+                .parked
+                .values()
+                .map(|parked| &parked.delegated.moved.pane_state.attached_terminal_id),
+        );
         terminal_ids.len()
     }
 
@@ -628,9 +1169,15 @@ impl App {
                 epoch: delegated.info.epoch,
             })
             .collect::<Vec<_>>();
-        let count = self.active_remote_presentation_count();
+        let count =
+            self.active_remote_presentation_count() + self.remote_presentations.parked.len();
         for claim in claims {
             self.terminate_terminal_delegation(&claim);
+        }
+
+        let parked = std::mem::take(&mut self.remote_presentations.parked);
+        for (_, parked) in parked {
+            self.terminate_delegated_pane(parked.delegated);
         }
 
         let pending = std::mem::take(&mut self.remote_presentations.pending);
@@ -641,11 +1188,11 @@ impl App {
     }
 
     pub(crate) fn terminate_remote_presentations_for_route_peer(&mut self, peer_id: &str) -> usize {
-        let claims = self
+        let active_ids = self
             .remote_presentations
             .active
-            .values()
-            .filter(|delegated| {
+            .iter()
+            .filter(|(_, delegated)| {
                 delegated
                     .info
                     .owner
@@ -653,10 +1200,7 @@ impl App {
                     .iter()
                     .any(|peer| peer == peer_id)
             })
-            .map(|delegated| TerminalDelegationClaim {
-                delegation_id: delegated.info.delegation_id.clone(),
-                epoch: delegated.info.epoch,
-            })
+            .map(|(delegation_id, _)| delegation_id.clone())
             .collect::<Vec<_>>();
         let pending_ids = self
             .remote_presentations
@@ -665,9 +1209,24 @@ impl App {
             .filter(|(_, pending)| pending.info.owner.route.iter().any(|peer| peer == peer_id))
             .map(|(delegation_id, _)| delegation_id.clone())
             .collect::<Vec<_>>();
-        let count = claims.len();
-        for claim in claims {
-            self.terminate_terminal_delegation(&claim);
+        let count = active_ids.len();
+        for delegation_id in active_ids {
+            let recoverable = self
+                .remote_presentations
+                .active
+                .get(&delegation_id)
+                .is_some_and(|delegated| delegated.recovery.is_some());
+            if recoverable {
+                if let Some(delegated) = self.remote_presentations.active.remove(&delegation_id) {
+                    self.repark_delegated(delegated);
+                }
+            } else if let Some(delegated) = self.remote_presentations.active.get(&delegation_id) {
+                let claim = TerminalDelegationClaim {
+                    delegation_id: delegated.info.delegation_id.clone(),
+                    epoch: delegated.info.epoch,
+                };
+                self.terminate_terminal_delegation(&claim);
+            }
         }
         for delegation_id in pending_ids {
             if let Some(pending) = self.remote_presentations.pending.remove(&delegation_id) {
@@ -682,6 +1241,11 @@ impl App {
             .active
             .values()
             .any(|delegated| delegated.info.terminal_id == terminal_id)
+            || self
+                .remote_presentations
+                .parked
+                .values()
+                .any(|parked| parked.delegated.info.terminal_id == terminal_id)
     }
 
     pub(crate) fn delegated_pane_for_public_id(
@@ -720,6 +1284,21 @@ impl App {
                             || terminal.effective_agent_label() == Some(target)
                     })
             })?;
+        self.agent_info_for_delegated(delegated)
+    }
+
+    pub(crate) fn parked_agent_info_for_id(
+        &self,
+        park_id: &str,
+    ) -> Option<crate::api::schema::AgentInfo> {
+        let delegated = &self.remote_presentations.parked.get(park_id)?.delegated;
+        self.agent_info_for_delegated(delegated)
+    }
+
+    fn agent_info_for_delegated(
+        &self,
+        delegated: &DelegatedPane,
+    ) -> Option<crate::api::schema::AgentInfo> {
         let terminal_id = &delegated.moved.pane_state.attached_terminal_id;
         let terminal = self.state.terminals.get(terminal_id)?;
         if !terminal.is_agent_terminal() {
@@ -801,7 +1380,7 @@ impl App {
     }
 
     pub(crate) fn handle_pending_delegation_pane_exit(&mut self, pane_id: PaneId) -> bool {
-        let Some(delegation_id) =
+        let delegation_id =
             self.remote_presentations
                 .pending
                 .iter()
@@ -813,17 +1392,57 @@ impl App {
                         pane_id: pending_pane_id,
                         ..
                     } if *pending_pane_id == pane_id => Some(delegation_id.clone()),
+                    PendingDelegationSource::Parked { park_id }
+                        if self
+                            .remote_presentations
+                            .parked
+                            .get(park_id)
+                            .is_some_and(|parked| parked.delegated.moved.pane_id == pane_id) =>
+                    {
+                        Some(delegation_id.clone())
+                    }
                     _ => None,
-                })
-        else {
-            return false;
-        };
-        let Some(pending) = self.remote_presentations.pending.remove(&delegation_id) else {
-            return false;
-        };
-        let was_hidden = matches!(&pending.source, PendingDelegationSource::New { .. });
-        self.fail_pending_delegation(pending);
-        was_hidden
+                });
+        if let Some(delegation_id) = delegation_id {
+            let Some(pending) = self.remote_presentations.pending.remove(&delegation_id) else {
+                return false;
+            };
+            let was_hidden = matches!(
+                &pending.source,
+                PendingDelegationSource::New { .. } | PendingDelegationSource::Parked { .. }
+            );
+            self.fail_pending_delegation(pending);
+            return was_hidden;
+        }
+
+        let active_id =
+            self.remote_presentations
+                .active
+                .iter()
+                .find_map(|(delegation_id, delegated)| {
+                    (delegated.moved.pane_id == pane_id).then(|| delegation_id.clone())
+                });
+        if let Some(active_id) = active_id {
+            if let Some(delegated) = self.remote_presentations.active.remove(&active_id) {
+                self.terminate_delegated_pane(delegated);
+                return true;
+            }
+        }
+
+        let parked_id = self
+            .remote_presentations
+            .parked
+            .iter()
+            .find_map(|(park_id, parked)| {
+                (parked.delegated.moved.pane_id == pane_id).then(|| park_id.clone())
+            });
+        if let Some(parked_id) = parked_id {
+            if let Some(parked) = self.remote_presentations.parked.remove(&parked_id) {
+                self.terminate_delegated_pane(parked.delegated);
+                return true;
+            }
+        }
+        false
     }
 
     fn fail_pending_takeovers_for(&mut self, previous_delegation_id: &str) {
@@ -879,6 +1498,15 @@ impl App {
                 }
             }
             PendingDelegationSource::Existing { .. } | PendingDelegationSource::Takeover { .. } => {
+            }
+            PendingDelegationSource::Parked { park_id } => {
+                if let Some(parked) = self.remote_presentations.parked.get_mut(&park_id) {
+                    if parked.lease_delegation_id.as_deref()
+                        == Some(pending.info.delegation_id.as_str())
+                    {
+                        parked.lease_delegation_id = None;
+                    }
+                }
             }
         }
         pending.info.status = TerminalDelegationStatus::Failed;
@@ -993,6 +1621,148 @@ fn delegated_matches_target(
         || delegated.info.pane_id == target
         || delegated.public_pane_id == target
         || aliased_pane_id == Some(delegated.moved.pane_id)
+}
+
+impl ParkedRecovery {
+    fn from_park_params(params: &TerminalDelegateParkParams) -> Result<Self, ErrorBody> {
+        validate_discovery_input(&params.origin_id, &params.discovery_token)?;
+        validate_secret("resume token", &params.resume_token)?;
+        if params.park_id.len() < 16 || params.park_id.len() > 256 {
+            return Err(ErrorBody {
+                code: "invalid_terminal_park_id".into(),
+                message: "terminal park id must contain between 16 and 256 bytes".into(),
+            });
+        }
+        Ok(Self {
+            park_id: params.park_id.clone(),
+            origin_id: params.origin_id.clone(),
+            resume_token_hash: hash_secret(&params.resume_token),
+            discovery_token_hash: hash_secret(&params.discovery_token),
+        })
+    }
+}
+
+fn validate_parked_target(target: &TerminalParkedTarget) -> Result<(), ErrorBody> {
+    if target.park_id.len() < 16 || target.park_id.len() > 256 || target.origin_id.is_empty() {
+        return Err(ErrorBody {
+            code: "invalid_terminal_park_target".into(),
+            message: "park id and origin id are required".into(),
+        });
+    }
+    validate_secret("resume token", &target.resume_token)
+}
+
+fn validate_discovery_input(origin_id: &str, discovery_token: &str) -> Result<(), ErrorBody> {
+    if origin_id.is_empty() || origin_id.len() > 256 {
+        return Err(ErrorBody {
+            code: "invalid_terminal_park_origin".into(),
+            message: "terminal park origin id is required".into(),
+        });
+    }
+    validate_secret("discovery token", discovery_token)
+}
+
+fn validate_secret(name: &str, value: &str) -> Result<(), ErrorBody> {
+    if value.len() < 32 || value.len() > 1024 {
+        return Err(ErrorBody {
+            code: "invalid_terminal_park_credential".into(),
+            message: format!("{name} must contain between 32 and 1024 bytes"),
+        });
+    }
+    Ok(())
+}
+
+fn hash_secret(value: &str) -> [u8; 32] {
+    Sha256::digest(value.as_bytes()).into()
+}
+
+fn authorize_recovery(
+    delegated: &DelegatedPane,
+    requested: &ParkedRecovery,
+) -> Result<(), ErrorBody> {
+    if delegated
+        .recovery
+        .as_ref()
+        .is_some_and(|stored| same_recovery(stored, requested))
+    {
+        Ok(())
+    } else {
+        Err(parked_unauthorized())
+    }
+}
+
+fn authorize_resume(
+    delegated: &DelegatedPane,
+    origin_id: &str,
+    resume_hash: &[u8; 32],
+) -> Result<(), ErrorBody> {
+    let recovery = delegated.recovery.as_ref().ok_or_else(parked_not_found)?;
+    if recovery.origin_id == origin_id
+        && secret_hash_matches(&recovery.resume_token_hash, resume_hash)
+    {
+        Ok(())
+    } else {
+        Err(parked_unauthorized())
+    }
+}
+
+fn same_recovery(left: &ParkedRecovery, right: &ParkedRecovery) -> bool {
+    left.park_id == right.park_id
+        && left.origin_id == right.origin_id
+        && secret_hash_matches(&left.resume_token_hash, &right.resume_token_hash)
+        && secret_hash_matches(&left.discovery_token_hash, &right.discovery_token_hash)
+}
+
+fn secret_hash_matches(left: &[u8; 32], right: &[u8; 32]) -> bool {
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+fn parked_info(parked: &ParkedPane) -> TerminalParkedInfo {
+    let mut info = active_parked_info(&parked.delegated);
+    info.status = TerminalDelegationStatus::Parked;
+    info.resuming = parked.lease_delegation_id.is_some();
+    info
+}
+
+fn active_parked_info(delegated: &DelegatedPane) -> TerminalParkedInfo {
+    let recovery = delegated
+        .recovery
+        .as_ref()
+        .expect("parked terminal must carry recovery metadata");
+    TerminalParkedInfo {
+        park_id: recovery.park_id.clone(),
+        terminal_id: delegated.info.terminal_id.clone(),
+        pane_id: delegated.info.pane_id.clone(),
+        origin_id: recovery.origin_id.clone(),
+        status: delegated.info.status,
+        resuming: false,
+    }
+}
+
+fn parked_not_found() -> ErrorBody {
+    ErrorBody {
+        code: "terminal_parked_not_found".into(),
+        message: "parked terminal was not found or has ended".into(),
+    }
+}
+
+fn parked_unauthorized() -> ErrorBody {
+    ErrorBody {
+        code: "terminal_parked_unauthorized".into(),
+        message: "parked terminal credentials do not match".into(),
+    }
+}
+
+fn parked_busy() -> ErrorBody {
+    ErrorBody {
+        code: "terminal_parked_busy".into(),
+        message: "parked terminal already has a resume operation in progress".into(),
+    }
 }
 
 fn validate_owner_route(
@@ -1145,6 +1915,204 @@ mod tests {
             delegation_id: info.delegation_id.clone(),
             epoch: info.epoch,
         }
+    }
+
+    fn park_params(info: &TerminalDelegationInfo) -> TerminalDelegateParkParams {
+        TerminalDelegateParkParams {
+            target: crate::api::schema::TerminalDelegationTarget {
+                delegation_id: info.delegation_id.clone(),
+                epoch: info.epoch,
+            },
+            park_id: "park-0123456789abcdef".into(),
+            origin_id: "origin-installation".into(),
+            resume_token: "resume-token-0123456789abcdef0123456789abcdef".into(),
+            discovery_token: "discovery-token-0123456789abcdef0123456789abcdef".into(),
+        }
+    }
+
+    fn parked_target(params: &TerminalDelegateParkParams) -> TerminalParkedTarget {
+        TerminalParkedTarget {
+            park_id: params.park_id.clone(),
+            origin_id: params.origin_id.clone(),
+            resume_token: params.resume_token.clone(),
+        }
+    }
+
+    #[test]
+    fn parking_is_hidden_idempotent_and_origin_filtered() {
+        let (mut app, terminal_id, _) = test_app();
+        let prepared = prepare_existing(
+            &mut app,
+            &terminal_id,
+            owner("owner-a", "pane-a", &["owner-a"]),
+            false,
+        );
+        app.commit_terminal_delegation(&claim(&prepared), &terminal_id)
+            .expect("commit delegation");
+        let params = park_params(&prepared);
+        let debug = format!("{params:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains(&params.resume_token));
+        assert!(!debug.contains(&params.discovery_token));
+
+        let first = app
+            .park_terminal_delegation(params.clone())
+            .expect("park terminal");
+        let second = app
+            .park_terminal_delegation(params.clone())
+            .expect("repeat park");
+
+        assert_eq!(first, second);
+        assert_eq!(first.status, TerminalDelegationStatus::Parked);
+        assert!(app.state.workspaces.is_empty());
+        assert_eq!(app.active_remote_presentation_count(), 0);
+        assert!(app.terminal_is_remotely_presented(&terminal_id));
+        assert_eq!(app.parked_terminal_inventory(), vec![first.clone()]);
+        assert_eq!(
+            app.parked_terminal_status(&parked_target(&params))
+                .expect("authorized status"),
+            first
+        );
+        assert_eq!(
+            app.list_parked_terminals(&TerminalParkedListParams {
+                origin_id: params.origin_id.clone(),
+                discovery_token: params.discovery_token.clone(),
+            })
+            .expect("authorized inventory")
+            .len(),
+            1
+        );
+        let error = app
+            .list_parked_terminals(&TerminalParkedListParams {
+                origin_id: params.origin_id,
+                discovery_token: "wrong-token-0123456789abcdef0123456789abcdef".into(),
+            })
+            .expect_err("wrong discovery token");
+        assert_eq!(error.code, "terminal_parked_unauthorized");
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn parked_resume_lease_expires_and_route_loss_reparks() {
+        let (mut app, terminal_id, _) = test_app();
+        let prepared = prepare_existing(
+            &mut app,
+            &terminal_id,
+            owner("owner-a", "pane-a", &["owner-a"]),
+            false,
+        );
+        app.commit_terminal_delegation(&claim(&prepared), &terminal_id)
+            .expect("commit delegation");
+        let params = park_params(&prepared);
+        app.park_terminal_delegation(params.clone())
+            .expect("park terminal");
+
+        let expired = app
+            .prepare_parked_terminal_resume(TerminalParkedResumeParams {
+                target: parked_target(&params),
+                owner: owner("owner-b", "pane-b", &["owner-b"]),
+            })
+            .expect("prepare expiring lease");
+        assert!(
+            app.parked_terminal_status(&parked_target(&params))
+                .expect("leased status")
+                .resuming
+        );
+        app.expire_remote_presentations(Instant::now() + PENDING_DELEGATION_TTL);
+        assert!(
+            !app.parked_terminal_status(&parked_target(&params))
+                .expect("park restored after expiry")
+                .resuming
+        );
+        assert_eq!(
+            app.terminal_delegation_info(&expired.delegation_id, expired.epoch)
+                .expect("expired lease status")
+                .status,
+            TerminalDelegationStatus::Failed
+        );
+
+        let resumed = app
+            .prepare_parked_terminal_resume(TerminalParkedResumeParams {
+                target: parked_target(&params),
+                owner: owner("owner-b", "pane-b", &["owner-b"]),
+            })
+            .expect("prepare resume");
+        app.commit_terminal_delegation(&claim(&resumed), &terminal_id)
+            .expect("commit resume");
+        assert_eq!(app.active_remote_presentation_count(), 1);
+        assert!(app.parked_terminal_inventory().is_empty());
+
+        assert_eq!(
+            app.terminate_remote_presentations_for_route_peer("owner-b"),
+            1
+        );
+        assert_eq!(app.active_remote_presentation_count(), 0);
+        assert_eq!(app.parked_terminal_inventory().len(), 1);
+        assert_eq!(
+            app.parked_terminal_status(&parked_target(&params))
+                .expect("reparked status")
+                .status,
+            TerminalDelegationStatus::Parked
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn explicit_parked_termination_removes_runtime_and_state() {
+        let (mut app, terminal_id, _) = test_app();
+        let prepared = prepare_existing(
+            &mut app,
+            &terminal_id,
+            owner("owner-a", "pane-a", &["owner-a"]),
+            false,
+        );
+        app.commit_terminal_delegation(&claim(&prepared), &terminal_id)
+            .expect("commit delegation");
+        let params = park_params(&prepared);
+        app.park_terminal_delegation(params.clone())
+            .expect("park terminal");
+
+        app.terminate_parked_terminal(&TerminalParkedResolveParams {
+            park_id: params.park_id,
+            origin_id: params.origin_id,
+            discovery_token: params.discovery_token,
+            action: crate::api::schema::TerminalParkedResolveAction::Terminate,
+            owner: None,
+        })
+        .expect("terminate parked terminal");
+
+        assert!(app.parked_terminal_inventory().is_empty());
+        assert!(!app
+            .state
+            .terminals
+            .keys()
+            .any(|id| id.to_string() == terminal_id));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn parked_process_exit_removes_hidden_recovery_entry() {
+        let (mut app, terminal_id, _) = test_app();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let prepared = prepare_existing(
+            &mut app,
+            &terminal_id,
+            owner("owner-a", "pane-a", &["owner-a"]),
+            false,
+        );
+        app.commit_terminal_delegation(&claim(&prepared), &terminal_id)
+            .expect("commit delegation");
+        app.park_terminal_delegation(park_params(&prepared))
+            .expect("park terminal");
+
+        assert!(app.handle_pending_delegation_pane_exit(pane_id));
+        assert!(app.parked_terminal_inventory().is_empty());
+        assert!(!app
+            .state
+            .terminals
+            .keys()
+            .any(|id| id.to_string() == terminal_id));
+        app.state.assert_invariants_for_test();
     }
 
     #[test]

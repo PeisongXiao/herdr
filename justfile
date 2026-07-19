@@ -186,3 +186,7 @@ release version:
 # Print default config
 default-config:
     cargo run --release --locked -- --default-config
+
+# Exercise automatic remote parking and restoration across isolated Docker nodes
+remote-restore-docker-test:
+    scripts/test_remote_restore_docker.sh

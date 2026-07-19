@@ -38,6 +38,13 @@ pub(super) enum MouseAction {
         pane_id: crate::layout::PaneId,
     },
     FocusToastTarget,
+    #[cfg(unix)]
+    RemoteRestore {
+        pane_id: crate::layout::PaneId,
+        action: crate::app::remote_resume::RemoteRestorePanelAction,
+    },
+    #[cfg(unix)]
+    OrphanReview(crate::app::state::OrphanReviewAction),
     MoveWorkspace {
         source_ws_idx: usize,
         insert_idx: usize,
@@ -99,9 +106,75 @@ impl AppState {
         terminal_runtimes: &mut TerminalRuntimeRegistry,
         mouse: MouseEvent,
     ) -> Option<MouseAction> {
+        #[cfg(unix)]
+        if let Some(review) = self.orphan_review.as_mut() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(areas) = crate::ui::orphan_review_areas(
+                    self.view.terminal_area,
+                    review.entries.len(),
+                    review.selected,
+                ) {
+                    if let Some(row_index) = areas
+                        .rows
+                        .iter()
+                        .position(|rect| rect_contains(*rect, mouse.column, mouse.row))
+                    {
+                        review.selected = areas.first_entry.saturating_add(row_index);
+                        review.error = None;
+                        return None;
+                    }
+                    let action = if rect_contains(areas.retain, mouse.column, mouse.row) {
+                        Some(crate::app::state::OrphanReviewAction::Retain)
+                    } else if rect_contains(areas.terminate, mouse.column, mouse.row) {
+                        Some(crate::app::state::OrphanReviewAction::Terminate)
+                    } else if rect_contains(areas.promote, mouse.column, mouse.row) {
+                        Some(crate::app::state::OrphanReviewAction::Promote)
+                    } else {
+                        None
+                    };
+                    if let Some(action) = action.filter(|_| review.pending_action.is_none()) {
+                        return Some(MouseAction::OrphanReview(action));
+                    }
+                }
+            }
+            return None;
+        }
+
         if self.mode == Mode::Onboarding {
             self.handle_onboarding_mouse(mouse);
             return None;
+        }
+
+        #[cfg(unix)]
+        if self.mode == Mode::Terminal
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
+                if let Some(panel) = self.remote_restore_panels.get(&info.id) {
+                    let buttons = crate::ui::remote_restore_panel_button_rects(
+                        info.inner_rect,
+                        &panel.status,
+                    );
+                    if buttons
+                        .retry
+                        .is_some_and(|rect| rect_contains(rect, mouse.column, mouse.row))
+                    {
+                        return Some(MouseAction::RemoteRestore {
+                            pane_id: info.id,
+                            action: crate::app::remote_resume::RemoteRestorePanelAction::Retry,
+                        });
+                    }
+                    if buttons
+                        .close
+                        .is_some_and(|rect| rect_contains(rect, mouse.column, mouse.row))
+                    {
+                        return Some(MouseAction::RemoteRestore {
+                            pane_id: info.id,
+                            action: crate::app::remote_resume::RemoteRestorePanelAction::Close,
+                        });
+                    }
+                }
+            }
         }
 
         if self.mode == Mode::Terminal

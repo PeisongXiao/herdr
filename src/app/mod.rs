@@ -129,6 +129,23 @@ pub struct App {
     pub(crate) remote_presentations: remote_presentations::RemotePresentationState,
     pub(crate) next_peer_refresh_generation: u64,
     pub(crate) remote_api_jobs_in_flight: usize,
+    #[cfg(unix)]
+    pub(crate) remote_restore_workers: HashMap<String, remote_resume::RemoteRestoreWorker>,
+    #[cfg(unix)]
+    pub(crate) remote_restore_queue: std::collections::VecDeque<remote_resume::QueuedRemoteRestore>,
+    #[cfg(unix)]
+    pub(crate) pending_remote_resume_requests:
+        HashMap<u64, remote_resume::PendingRemoteResumeRequest>,
+    #[cfg(unix)]
+    pub(crate) next_remote_restore_generation: u64,
+    #[cfg(unix)]
+    pub(crate) next_remote_resume_request_token: u64,
+    #[cfg(unix)]
+    pub(crate) remote_orphan_inventory_cancellations:
+        HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(unix)]
+    pub(crate) remote_orphan_action_cancellations:
+        HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
@@ -620,6 +637,8 @@ impl App {
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
+            remote_restore_panels: std::collections::HashMap::new(),
+            orphan_review: None,
             update_available,
             update_install_command,
             latest_release_notes_available,
@@ -758,6 +777,20 @@ impl App {
             remote_presentations: remote_presentations::RemotePresentationState::default(),
             next_peer_refresh_generation: 1,
             remote_api_jobs_in_flight: 0,
+            #[cfg(unix)]
+            remote_restore_workers: HashMap::new(),
+            #[cfg(unix)]
+            remote_restore_queue: std::collections::VecDeque::new(),
+            #[cfg(unix)]
+            pending_remote_resume_requests: HashMap::new(),
+            #[cfg(unix)]
+            next_remote_restore_generation: 1,
+            #[cfg(unix)]
+            next_remote_resume_request_token: 1,
+            #[cfg(unix)]
+            remote_orphan_inventory_cancellations: HashMap::new(),
+            #[cfg(unix)]
+            remote_orphan_action_cancellations: HashMap::new(),
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,

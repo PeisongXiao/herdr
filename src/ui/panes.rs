@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -15,6 +15,306 @@ use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
 use crate::layout::PaneInfo;
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RemoteRestorePanelButtons {
+    pub retry: Option<Rect>,
+    pub close: Option<Rect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrphanReviewAreas {
+    pub popup: Rect,
+    pub rows: Vec<Rect>,
+    pub first_entry: usize,
+    pub retain: Rect,
+    pub terminate: Rect,
+    pub promote: Rect,
+}
+
+pub(crate) fn orphan_review_areas(
+    area: Rect,
+    entry_count: usize,
+    selected: usize,
+) -> Option<OrphanReviewAreas> {
+    let height = (entry_count as u16).saturating_add(8).clamp(10, 24);
+    let popup = super::widgets::centered_popup_rect(area, 82, height)?;
+    let inner = Rect::new(
+        popup.x.saturating_add(1),
+        popup.y.saturating_add(1),
+        popup.width.saturating_sub(2),
+        popup.height.saturating_sub(2),
+    );
+    let visible_rows = inner.height.saturating_sub(5) as usize;
+    let rows = (0..entry_count.min(visible_rows))
+        .map(|index| {
+            Rect::new(
+                inner.x,
+                inner.y.saturating_add(3 + index as u16),
+                inner.width,
+                1,
+            )
+        })
+        .collect::<Vec<_>>();
+    let selected = selected.min(entry_count.saturating_sub(1));
+    let first_entry = selected
+        .saturating_add(1)
+        .saturating_sub(rows.len())
+        .min(entry_count.saturating_sub(rows.len()));
+    let specs = [
+        super::widgets::ActionButtonSpec {
+            hint: Some("R"),
+            label: "Retain",
+        },
+        super::widgets::ActionButtonSpec {
+            hint: Some("T"),
+            label: "Terminate",
+        },
+        super::widgets::ActionButtonSpec {
+            hint: Some("P"),
+            label: "Promote",
+        },
+    ];
+    let buttons =
+        super::widgets::action_button_row_rects(inner, &specs, 2, inner.height.saturating_sub(1));
+    Some(OrphanReviewAreas {
+        popup,
+        rows,
+        first_entry,
+        retain: buttons[0],
+        terminate: buttons[1],
+        promote: buttons[2],
+    })
+}
+
+fn render_orphan_review(app: &AppState, frame: &mut Frame, area: Rect) {
+    let Some(review) = app.orphan_review.as_ref() else {
+        return;
+    };
+    let Some(areas) = orphan_review_areas(area, review.entries.len(), review.selected) else {
+        return;
+    };
+    super::dim_background(frame, area);
+    let Some(inner) = super::widgets::render_panel_shell(
+        frame,
+        areas.popup,
+        app.palette.peach,
+        app.palette.panel_bg,
+    ) else {
+        return;
+    };
+    frame.render_widget(
+        Paragraph::new("Parked terminal review")
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(app.palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("Hidden terminals need an explicit disposition")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(app.palette.subtext0)),
+        Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1),
+    );
+    for (row_index, row) in areas.rows.iter().enumerate() {
+        let index = areas.first_entry.saturating_add(row_index);
+        let Some(entry) = review.entries.get(index) else {
+            continue;
+        };
+        let source = match &entry.source {
+            crate::app::state::OrphanReviewSource::LocalServer => "this server".to_string(),
+            crate::app::state::OrphanReviewSource::RemotePeer { peer_id } => {
+                format!("peer {peer_id}")
+            }
+        };
+        let marker = if index == review.selected { ">" } else { " " };
+        let text = format!(
+            "{marker} {}  terminal {}  pane {}  {source}",
+            entry.park_id, entry.terminal_id, entry.pane_id
+        );
+        let style = if index == review.selected {
+            Style::default()
+                .fg(app.palette.text)
+                .bg(app.palette.surface1)
+        } else {
+            Style::default().fg(app.palette.overlay1)
+        };
+        frame.render_widget(Paragraph::new(text).style(style), *row);
+    }
+    let status_y = inner.y.saturating_add(inner.height.saturating_sub(2));
+    if review.pending_action.is_some() {
+        frame.render_widget(
+            Paragraph::new(" applying action...").style(Style::default().fg(app.palette.yellow)),
+            Rect::new(inner.x, status_y, inner.width, 1),
+        );
+    } else if let Some(error) = &review.error {
+        frame.render_widget(
+            Paragraph::new(format!(" {error}")).style(Style::default().fg(app.palette.red)),
+            Rect::new(inner.x, status_y, inner.width, 1),
+        );
+    }
+    let disabled = review.pending_action.is_some();
+    let neutral = if disabled {
+        Style::default()
+            .fg(app.palette.overlay0)
+            .bg(app.palette.surface0)
+    } else {
+        Style::default()
+            .fg(app.palette.text)
+            .bg(app.palette.surface1)
+    };
+    super::widgets::render_action_button(frame, areas.retain, Some("R"), "Retain", neutral);
+    super::widgets::render_action_button(
+        frame,
+        areas.terminate,
+        Some("T"),
+        "Terminate",
+        if disabled {
+            neutral
+        } else {
+            Style::default()
+                .fg(app.palette.panel_bg)
+                .bg(app.palette.red)
+        },
+    );
+    super::widgets::render_action_button(
+        frame,
+        areas.promote,
+        Some("P"),
+        "Promote",
+        if disabled {
+            neutral
+        } else {
+            Style::default()
+                .fg(app.palette.panel_bg)
+                .bg(app.palette.accent)
+        },
+    );
+}
+
+pub(crate) fn remote_restore_panel_button_rects(
+    area: Rect,
+    status: &crate::app::state::RemoteRestoreStatus,
+) -> RemoteRestorePanelButtons {
+    if area.height < 3 || area.width < 8 {
+        return RemoteRestorePanelButtons::default();
+    }
+    let can_retry = status.can_retry();
+    let specs = if can_retry {
+        vec![
+            super::widgets::ActionButtonSpec {
+                hint: Some("R"),
+                label: "Retry",
+            },
+            super::widgets::ActionButtonSpec {
+                hint: Some("C"),
+                label: "Close",
+            },
+        ]
+    } else {
+        vec![super::widgets::ActionButtonSpec {
+            hint: Some("C"),
+            label: "Close",
+        }]
+    };
+    let rects =
+        super::widgets::action_button_row_rects(area, &specs, 2, area.height.saturating_sub(1));
+    if can_retry {
+        RemoteRestorePanelButtons {
+            retry: rects.first().copied(),
+            close: rects.get(1).copied(),
+        }
+    } else {
+        RemoteRestorePanelButtons {
+            retry: None,
+            close: rects.first().copied(),
+        }
+    }
+}
+
+fn render_remote_restore_panel(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    panel: &crate::app::state::RemoteRestorePanelState,
+) {
+    use crate::app::state::RemoteRestoreStatus;
+
+    frame.render_widget(
+        Block::default().style(Style::default().bg(app.palette.panel_bg)),
+        area,
+    );
+    let (title, detail, color) = match &panel.status {
+        RemoteRestoreStatus::Restoring => (
+            "Restoring remote terminal",
+            format!("Connecting through {}", panel.peer_id),
+            app.palette.accent,
+        ),
+        RemoteRestoreStatus::TimedOut { message } => (
+            "Restoration timed out after 120 seconds",
+            message.clone(),
+            app.palette.peach,
+        ),
+        RemoteRestoreStatus::Retryable { message } => (
+            "Remote terminal is not available yet",
+            message.clone(),
+            app.palette.yellow,
+        ),
+        RemoteRestoreStatus::Ended { message } => {
+            ("Remote terminal ended", message.clone(), app.palette.red)
+        }
+    };
+    let title_y = area.y.saturating_add(area.height.saturating_sub(5) / 2);
+    let title_rect = Rect::new(area.x, title_y, area.width, 1);
+    frame.render_widget(
+        Paragraph::new(title)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        title_rect,
+    );
+    if area.height >= 3 {
+        let detail_rect = Rect::new(
+            area.x.saturating_add(1),
+            title_y.saturating_add(1),
+            area.width.saturating_sub(2),
+            area.height
+                .saturating_sub(title_y.saturating_sub(area.y) + 3),
+        );
+        frame.render_widget(
+            Paragraph::new(detail)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(app.palette.subtext0)),
+            detail_rect,
+        );
+    }
+    let buttons = remote_restore_panel_button_rects(area, &panel.status);
+    if let Some(rect) = buttons.retry {
+        super::widgets::render_action_button(
+            frame,
+            rect,
+            Some("R"),
+            "Retry",
+            Style::default()
+                .fg(app.palette.panel_bg)
+                .bg(app.palette.accent),
+        );
+    }
+    if let Some(rect) = buttons.close {
+        super::widgets::render_action_button(
+            frame,
+            rect,
+            Some("C"),
+            "Close",
+            Style::default()
+                .fg(app.palette.text)
+                .bg(app.palette.surface1),
+        );
+    }
+}
 
 pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
     rt.scroll_metrics()
@@ -300,10 +600,12 @@ pub(super) fn render_panes(
 ) {
     let Some(ws_idx) = app.active else {
         render_empty(app, frame, area);
+        render_orphan_review(app, frame, area);
         return;
     };
     let Some(ws) = app.workspaces.get(ws_idx) else {
         render_empty(app, frame, area);
+        render_orphan_review(app, frame, area);
         return;
     };
 
@@ -311,7 +613,11 @@ pub(super) fn render_panes(
     let terminal_active = app.mode == Mode::Terminal;
 
     for info in &app.view.pane_infos {
-        if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
+        if let Some(panel) = app.remote_restore_panels.get(&info.id) {
+            render_remote_restore_panel(app, frame, info.inner_rect, panel);
+        } else if let Some(rt) =
+            app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
+        {
             let show_cursor = info.is_focused
                 && terminal_active
                 && !pane_is_scrolled_back(rt)
@@ -345,6 +651,7 @@ pub(super) fn render_panes(
     }
 
     render_pane_borders(app, ws, frame);
+    render_orphan_review(app, frame, area);
 }
 
 #[derive(Clone, Copy, Default)]
@@ -788,6 +1095,49 @@ mod tests {
     use crate::terminal::TerminalRuntime;
     use crate::terminal::TerminalState;
     use crate::workspace::Workspace;
+
+    #[test]
+    fn orphan_review_rows_include_the_selected_entry() {
+        let area = Rect::new(0, 0, 100, 30);
+        let top = orphan_review_areas(area, 30, 4).unwrap();
+        let bottom = orphan_review_areas(area, 30, 29).unwrap();
+
+        assert_eq!(top.first_entry, 0);
+        assert!(bottom.first_entry > 0);
+        assert!(bottom.first_entry <= 29);
+        assert!(29 < bottom.first_entry + bottom.rows.len());
+    }
+
+    #[test]
+    fn orphan_review_renders_without_an_active_workspace() {
+        let mut app = AppState::test_new();
+        app.workspaces.clear();
+        app.active = None;
+        app.orphan_review = Some(crate::app::state::OrphanReviewState {
+            entries: vec![crate::app::state::OrphanReviewEntry {
+                park_id: "parked-1".into(),
+                terminal_id: "terminal-1".into(),
+                pane_id: "pane-1".into(),
+                source: crate::app::state::OrphanReviewSource::LocalServer,
+            }],
+            ..Default::default()
+        });
+        let area = Rect::new(0, 0, 100, 30);
+        let runtimes = TerminalRuntimeRegistry::default();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+
+        terminal
+            .draw(|frame| render_panes(&app, &runtimes, frame, area))
+            .unwrap();
+
+        let areas = orphan_review_areas(area, 1, 0).unwrap();
+        let title_y = areas.popup.y.saturating_add(1);
+        let title = (areas.popup.x..areas.popup.x.saturating_add(areas.popup.width))
+            .map(|x| terminal.backend().buffer()[(x, title_y)].symbol())
+            .collect::<String>();
+        assert!(title.contains("Parked terminal review"));
+    }
 
     #[test]
     fn pane_border_title_trims_and_truncates() {
@@ -1288,4 +1638,29 @@ mod tests {
         };
         assert!(relative_luminance((r, g, b)) > relative_luminance((12, 14, 16)));
     }
+}
+#[test]
+fn timed_out_restore_panel_exposes_independent_retry_and_close_actions() {
+    let area = Rect::new(4, 2, 48, 10);
+    let buttons = remote_restore_panel_button_rects(
+        area,
+        &crate::app::state::RemoteRestoreStatus::TimedOut {
+            message: "unreachable".into(),
+        },
+    );
+
+    assert!(buttons.retry.is_some());
+    assert!(buttons.close.is_some());
+    assert_ne!(buttons.retry, buttons.close);
+}
+
+#[test]
+fn restoring_panel_allows_close_without_offering_duplicate_retry() {
+    let buttons = remote_restore_panel_button_rects(
+        Rect::new(0, 0, 40, 8),
+        &crate::app::state::RemoteRestoreStatus::Restoring,
+    );
+
+    assert!(buttons.retry.is_none());
+    assert!(buttons.close.is_some());
 }

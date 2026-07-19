@@ -273,6 +273,7 @@ impl App {
             }
             #[cfg(unix)]
             AppEvent::RemoteReacquireFinished(batch) => {
+                self.finish_remote_api_job();
                 let mut batch = *batch;
                 for finished in &mut batch.results {
                     if let Ok(remote) = &mut finished.result {
@@ -285,6 +286,37 @@ impl App {
                         "server_unavailable",
                         "server shut down while remote pane re-acquire was running",
                     ));
+                }
+                None
+            }
+            #[cfg(unix)]
+            AppEvent::RemoteParkedTerminateFinished(result) => {
+                self.finish_remote_api_job();
+                if let Err(err) = result.result {
+                    tracing::warn!(
+                        terminal = %result.remote_terminal_id,
+                        error = %err,
+                        "parked terminal termination failed during shutdown"
+                    );
+                }
+                None
+            }
+            #[cfg(unix)]
+            AppEvent::RemoteOrphanInventoryFinished(result) => {
+                self.finish_remote_api_job();
+                self.remote_orphan_inventory_cancellations
+                    .remove(&result.peer_id);
+                None
+            }
+            #[cfg(unix)]
+            AppEvent::RemoteOrphanResolveFinished(mut result) => {
+                self.finish_remote_api_job();
+                self.remote_orphan_action_cancellations
+                    .remove(&result.entry.park_id);
+                if let Ok(crate::events::RemoteOrphanResolveOutcome::Promoted(remote)) =
+                    &mut result.result
+                {
+                    crate::remote_agent::rollback_reacquire(remote);
                 }
                 None
             }
@@ -377,6 +409,24 @@ impl App {
         #[cfg(unix)]
         if let AppEvent::RemoteReacquireFinished(batch) = ev {
             self.finish_remote_reacquire(*batch);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::RemoteParkedTerminateFinished(result) = ev {
+            self.finish_remote_parked_terminate(result);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::RemoteOrphanInventoryFinished(result) = ev {
+            self.finish_remote_orphan_inventory(result);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::RemoteOrphanResolveFinished(result) = ev {
+            self.finish_remote_orphan_resolve(result);
             return;
         }
 
@@ -903,7 +953,7 @@ impl App {
         }
     }
 
-    fn respawn_shell_for_launch_pane(&mut self, pane_id: crate::layout::PaneId) -> bool {
+    pub(super) fn respawn_shell_for_launch_pane(&mut self, pane_id: crate::layout::PaneId) -> bool {
         let Some((ws_idx, pane_state)) = self.find_pane(pane_id) else {
             return false;
         };
@@ -1407,6 +1457,39 @@ impl App {
             }
             Method::TerminalDelegateHandoff(params) => {
                 return self.handle_terminal_delegate_handoff(request.id, params);
+            }
+            Method::TerminalDelegatePark(params) => {
+                return self.handle_terminal_delegate_park(request.id, params);
+            }
+            Method::TerminalParkedStatus(params) => {
+                return self.handle_terminal_parked_status(request.id, params);
+            }
+            Method::TerminalParkedResume(params) => {
+                return self.handle_terminal_parked_resume(request.id, params);
+            }
+            Method::TerminalParkedList(params) => {
+                return self.handle_terminal_parked_list(request.id, params);
+            }
+            Method::TerminalParkedResolve(params) => {
+                return self.handle_terminal_parked_resolve(request.id, params);
+            }
+            Method::TerminalParkedAdminList(params) => {
+                return self.handle_terminal_parked_admin_list(request.id, params);
+            }
+            Method::TerminalParkedAdminResolve(params) => {
+                return self.handle_terminal_parked_admin_resolve(request.id, params);
+            }
+            Method::TerminalRecoveryList(params) => {
+                return self.handle_terminal_recovery_list(request.id, params);
+            }
+            Method::TerminalRecoveryStatus(params) => {
+                return self.handle_terminal_recovery_status(request.id, params);
+            }
+            Method::TerminalRecoveryRetry(params) => {
+                return self.handle_terminal_recovery_retry(request.id, params);
+            }
+            Method::TerminalRecoveryDiscard(params) => {
+                return self.handle_terminal_recovery_discard(request.id, params);
             }
             Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
@@ -2671,3 +2754,4 @@ mod tests {
         );
     }
 }
+mod recovery;

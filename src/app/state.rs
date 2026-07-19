@@ -1227,6 +1227,67 @@ pub struct ToastNotification {
     pub target: Option<ToastTarget>,
 }
 
+// Remote restoration remains part of AppState's cross-platform shape, but only
+// Unix constructs restoration statuses while remote transport is Unix-only.
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteRestoreStatus {
+    Restoring,
+    TimedOut { message: String },
+    Retryable { message: String },
+    Ended { message: String },
+}
+
+impl RemoteRestoreStatus {
+    pub fn can_retry(&self) -> bool {
+        matches!(self, Self::TimedOut { .. } | Self::Retryable { .. })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRestorePanelState {
+    pub remote_terminal_id: String,
+    pub peer_id: String,
+    pub status: RemoteRestoreStatus,
+    pub generation: u64,
+    pub timeout_notified: bool,
+}
+
+// Orphan review remains part of AppState's cross-platform shape, but only Unix
+// constructs review actions while parked-terminal recovery is Unix-only.
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrphanReviewAction {
+    Retain,
+    Terminate,
+    Promote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanReviewEntry {
+    pub park_id: String,
+    pub terminal_id: String,
+    pub pane_id: String,
+    pub source: OrphanReviewSource,
+}
+
+// Orphan review remains part of AppState's cross-platform shape, but only Unix
+// constructs review sources while parked-terminal recovery is Unix-only.
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrphanReviewSource {
+    LocalServer,
+    RemotePeer { peer_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OrphanReviewState {
+    pub entries: Vec<OrphanReviewEntry>,
+    pub selected: usize,
+    pub pending_action: Option<(String, OrphanReviewAction)>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAgentNotification {
     pub pane_id: PaneId,
@@ -1356,6 +1417,11 @@ pub struct AppState {
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub context_menu: Option<ContextMenuState>,
+    /// Pane-local presentation state for exact-slot remote restoration.
+    pub remote_restore_panels: std::collections::HashMap<PaneId, RemoteRestorePanelState>,
+    /// Populated by parked-terminal inventory discovery. Rendering and remote
+    /// resolution can evolve independently of the restore worker lifecycle.
+    pub orphan_review: Option<OrphanReviewState>,
     // Notifications
     pub update_available: Option<String>,
     pub update_install_command: String,
@@ -1723,6 +1789,8 @@ impl AppState {
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
+            remote_restore_panels: std::collections::HashMap::new(),
+            orphan_review: None,
             update_available: None,
             update_install_command: "herdr update".into(),
             latest_release_notes_available: false,

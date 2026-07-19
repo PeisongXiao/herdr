@@ -514,6 +514,8 @@ fn restore_tab(
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
+        let saved_remote_restore_reservation =
+            saved_pane.is_some_and(|pane| pane.remote_restore_reservation);
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
         let startup = {
@@ -543,6 +545,22 @@ fn restore_tab(
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
+        if saved_remote_restore_reservation {
+            let terminal_id = TerminalId::alloc();
+            let mut terminal = TerminalState::new(terminal_id.clone(), cwd);
+            if let Some(label) = saved_label {
+                terminal.set_manual_label(label);
+            }
+            if let Some(agent_name) = saved_agent_name {
+                terminal.set_agent_name(agent_name);
+            }
+            panes.insert(
+                *id,
+                PaneState::new(terminal_id).with_remote_restore_reservation(),
+            );
+            terminals.push(terminal);
+            continue;
+        }
         let pending_native_agent_restore = if was_imported {
             None
         } else {
@@ -1029,6 +1047,41 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
+    async fn explicit_remote_restore_reservation_restores_without_a_pty() {
+        let mut snapshot = legacy_remote_snapshot(&std::env::current_dir().unwrap());
+        snapshot.workspaces[0].tabs[0]
+            .panes
+            .values_mut()
+            .next()
+            .expect("saved pane")
+            .remote_restore_reservation = true;
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let (workspaces, _terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            true,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let pane = workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .expect("restored reservation");
+        assert!(pane.remote_restore_reservation);
+        assert!(runtimes.is_empty(), "reservation must not allocate a PTY");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
     async fn legacy_remote_snapshot_does_not_discard_an_imported_handoff_pty() {
         use portable_pty::{native_pty_system, PtySize};
 
@@ -1351,6 +1404,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             launch_argv: None,
+                            remote_restore_reservation: false,
                         },
                     )]),
                     zoomed: false,
@@ -1429,6 +1483,7 @@ mod tests {
                                 agent_name: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                remote_restore_reservation: false,
                             },
                         ),
                         (
@@ -1439,6 +1494,7 @@ mod tests {
                                 agent_name: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                remote_restore_reservation: false,
                             },
                         ),
                     ]),
@@ -1491,6 +1547,7 @@ mod tests {
                     agent_name: None,
                     agent_session: None,
                     launch_argv: None,
+                    remote_restore_reservation: false,
                 },
             )
         };
@@ -1505,6 +1562,7 @@ mod tests {
                 value: "codex-session".into(),
             }),
             launch_argv: None,
+            remote_restore_reservation: false,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1656,6 +1714,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             launch_argv: None,
+                            remote_restore_reservation: false,
                         },
                     )]),
                     zoomed: false,
@@ -1817,6 +1876,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                remote_restore_reservation: false,
             },
         );
         let history = SessionHistorySnapshot {

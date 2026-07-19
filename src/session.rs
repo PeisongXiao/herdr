@@ -11,7 +11,10 @@ pub const SESSION_ENV_VAR: &str = "HERDR_SESSION";
 pub const DEFAULT_SESSION_NAME: &str = "default";
 
 const MAX_SESSION_NAME_LEN: usize = 64;
-const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+// A graceful stop can synchronously park remote terminals, quiesce remote API
+// work, and wait for SSH cleanup before its sockets disappear. Keep this
+// client-side envelope separate from each terminal's restoration timeout.
+const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const STOP_WAIT_POLL: Duration = Duration::from_millis(25);
 const MIN_SOCKET_TIMEOUT: Duration = Duration::from_millis(1);
 
@@ -24,6 +27,13 @@ pub struct SessionInfo {
     pub running: bool,
     pub socket_path: String,
     pub session_dir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SessionDeleteOutcome {
+    pub session: SessionInfo,
+    pub discarded_recovery_tickets: usize,
+    pub orphaned_remote_terminals: usize,
 }
 
 pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
@@ -321,7 +331,18 @@ fn remote_presentation_stop_outcome(response: &serde_json::Value) -> StopOutcome
     }
 }
 
-pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
+#[cfg(test)]
+pub fn delete_session(name: &str) -> Result<SessionDeleteOutcome, String> {
+    delete_session_with_options(name, false)
+}
+
+pub fn delete_session_with_options(
+    name: &str,
+    force: bool,
+) -> Result<SessionDeleteOutcome, String> {
+    #[cfg(not(unix))]
+    let _ = force;
+
     if name == DEFAULT_SESSION_NAME {
         return Err("deleting the default session is not supported".to_string());
     }
@@ -332,13 +353,48 @@ pub fn delete_session(name: &str) -> Result<SessionInfo, String> {
             "session {name} is running; stop it before deleting"
         ));
     }
+    #[cfg(unix)]
+    let mut resume_store = crate::remote_resume::ResumeStore::for_session(Some(name))
+        .map_err(|err| format!("failed to inspect recovery tickets for session {name}: {err}"))?;
+    #[cfg(unix)]
+    if !force && !resume_store.is_empty() {
+        return Err(format!(
+            "session {name} has {} recoverable remote terminal ticket(s); rerun with --force to discard them",
+            resume_store.recoverable_count()
+        ));
+    }
+    #[cfg(unix)]
+    let orphaned_remote_terminals = if force {
+        resume_store.potential_orphan_count()
+    } else {
+        0
+    };
+    #[cfg(not(unix))]
+    let orphaned_remote_terminals = 0;
     let info = session_info(Some(name));
     let dir = data_dir_for(Some(name));
     match std::fs::remove_dir_all(&dir) {
-        Ok(()) => Ok(info),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(info),
-        Err(err) => Err(err.to_string()),
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.to_string()),
     }
+    #[cfg(unix)]
+    let discarded_recovery_tickets = if force {
+        resume_store.clear().map_err(|err| {
+            format!(
+                "session {name} was deleted, but its recovery tickets could not be discarded: {err}"
+            )
+        })?
+    } else {
+        0
+    };
+    #[cfg(not(unix))]
+    let discarded_recovery_tickets = 0;
+    Ok(SessionDeleteOutcome {
+        session: info,
+        discarded_recovery_tickets,
+        orphaned_remote_terminals,
+    })
 }
 
 fn send_stop_request(
@@ -1071,6 +1127,74 @@ mod tests {
     #[test]
     fn delete_default_session_is_rejected() {
         assert!(delete_session(DEFAULT_SESSION_NAME).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_delete_requires_force_for_recovery_tickets_and_preserves_identity() {
+        let _guard = env_lock().lock().unwrap();
+        let root = unique_test_path("delete-recovery");
+        let config_home = root.join("config");
+        let state_home = root.join("state");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::set_var("XDG_STATE_HOME", &state_home);
+        let name = "recoverable";
+        std::fs::create_dir_all(data_dir_for(Some(name))).unwrap();
+        let mut store = crate::remote_resume::ResumeStore::for_session(Some(name)).unwrap();
+        let record = crate::remote_resume::ResumeRecord {
+            schema: crate::remote_resume::RESUME_SCHEMA_VERSION,
+            remote_terminal_id: "terminal-a".to_string(),
+            remote_pane_id: "workspace:pane".to_string(),
+            peer_id: "peer-a".to_string(),
+            ssh: crate::remote_resume::ResumeSsh {
+                target: "remote".to_string(),
+                ssh_args: Vec::new(),
+                session: None,
+            },
+            agent: None,
+            placement: crate::remote_resume::ResumePlacement {
+                workspace_id: "workspace".to_string(),
+                public_tab_id: "workspace:tab".to_string(),
+                public_pane_id: Some("workspace:pane".to_string()),
+                pane_index: Some(0),
+            },
+            handed_off_at_unix_ms: 1,
+            last_error: None,
+        };
+        store
+            .upsert_parking(
+                record,
+                "park-a".to_string(),
+                crate::remote_resume::SecretToken::new("resume-a".to_string()).unwrap(),
+            )
+            .unwrap();
+        let mut identity = crate::remote_resume::RecoveryIdentityStore::open_global().unwrap();
+        let credentials = identity.credentials_for_peer("peer-a").unwrap();
+
+        let error = delete_session(name).expect_err("delete must refuse tickets");
+        assert!(
+            error.contains("1 recoverable remote terminal ticket"),
+            "{error}"
+        );
+        assert!(data_dir_for(Some(name)).exists());
+
+        let outcome = delete_session_with_options(name, true).expect("force delete");
+        assert_eq!(outcome.discarded_recovery_tickets, 1);
+        assert_eq!(outcome.orphaned_remote_terminals, 1);
+        assert!(!data_dir_for(Some(name)).exists());
+        assert!(crate::remote_resume::ResumeStore::for_session(Some(name))
+            .unwrap()
+            .is_empty());
+        let mut reopened_identity =
+            crate::remote_resume::RecoveryIdentityStore::open_global().unwrap();
+        assert_eq!(
+            reopened_identity.credentials_for_peer("peer-a").unwrap(),
+            credentials
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
     }
 
     #[test]

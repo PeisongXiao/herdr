@@ -114,7 +114,7 @@ ssh workbox
 
 OpenSSH performs normal foreground authentication. Herdr then finds or starts the remote Herdr daemon, verifies the required protocol and capabilities, links the two servers, and presents a new remote shell in the pane where you ran `ssh`. The managed shell belongs to remote Herdr session `default`; you do not start a second TUI or choose a remote socket.
 
-This workflow delegates a pane instead of mirroring it. Its process and PTY stay on the remote host, but the pane is present in a workspace on exactly one machine. While your local Herdr presents it, the remote daemon removes it from its own workspace list. The [pane ownership and lifecycle](#pane-ownership-and-lifecycle) section below explains why this path is intentionally destructive on disconnect and how to keep a pane with `herdr remote-handoff`.
+This workflow delegates a pane instead of mirroring it. Its process and PTY stay on the remote host, but the pane is present in a workspace on exactly one machine. While your local Herdr presents it, the remote daemon removes it from its own workspace list. Manual `remote-handoff` makes it visible on the host; automatic shutdown recovery instead parks it invisibly until the owner returns.
 
 ## SSH agent sessions
 
@@ -126,7 +126,7 @@ herdr agent start reviewer --ssh workbox --agent opencode --cwd /repo -- opencod
 
 This direct federation path is currently Unix-only. The local Herdr server authenticates with OpenSSH, starts the remote Herdr server if needed, checks protocol, peer-federation, and remote-presentation compatibility, optionally prepares the official agent integration, starts the agent remotely, and delegates its pane into a local workspace. Before opening managed SSH, the CLI rejects effective SSH config that changes interactive session semantics; the server enforces the same boundary for SSH-backed agent and API requests.
 
-The delegated pane and peer bridge are runtime-only. They are not a detachable remote session: closing the local owner pane, stopping the local Herdr server, or losing the SSH transport terminates the remote pane and agent. If the work should continue on the remote host, run `herdr remote-handoff` from inside the presented pane before disconnecting. This terminal handoff is separate from the server-replacement `--handoff` option used by updates and `herdr --remote`.
+The delegated pane and peer bridge are runtime-only. Closing the local owner pane or losing an unmanaged connection remains destructive. With automatic remote handoff enabled, a graceful local server stop durably parks the PTY on its host without putting it into a remote workspace, then restores it into the same local layout slot on the next start. Manual `herdr remote-handoff` remains the explicit way to make it visible remotely.
 
 Herdr chooses the integration from `--agent AGENT`, or recognizes the first command in `argv` when `--agent` is omitted. Use `--no-remote-integration` when hooks are already managed or the command is not a recognized agent. `--ssh` accepts an SSH target rather than arbitrary SSH options, so put ports, identities, jump hosts, and similar settings in `~/.ssh/config`.
 
@@ -247,18 +247,18 @@ A plain pane `ssh` bridge is released when that foreground SSH attach ends. The 
 
 Concurrent connections to the same peer are tracked independently, and removing one does not terminate the others. During shutdown, every bridge checks that the remote registration still points to its own forwarded socket before unregistering it, so cleanup cannot remove a surviving bridge's newer registration. Socket and control-connection cleanup continues on a detached worker. Peer links are runtime state, not durable machine pairings: `herdr peer health <peer_id>` refreshes status, `herdr peer unregister <peer_id>` removes all active bridges for that peer, and a server restart requires reconnecting. Active or pending presentations, active links, and detached cleanup block server live handoff; after handing back or closing remote panes and unregistering the final peer, wait briefly for cleanup to finish before retrying. Delegated panes owned through a removed or expired route are terminated rather than left running invisibly. Rerun supported `ssh` to create a fresh remote shell, or hand off before disconnecting when the existing pane must survive.
 
-## Automatic handoff on server stop
+## Automatic parking on server stop
 
-Delegated remote panes normally die with their owner: stopping the local Herdr server terminates the remote pane and its process. With `[remote] auto_remote_handoff = true`, a graceful server stop instead hands each delegated pane back to its host — the same move `herdr remote-handoff` performs for one pane — and the next server start re-acquires the pane into the workspace and tab it came from. This is meant for shutting the local machine down while the remote hosts keep running.
+Delegated remote panes normally die with their owner. With `[remote] auto_remote_handoff = true`, a graceful server stop instead parks every eligible pane on its host. A parked terminal keeps its native PTY and process alive but is absent from remote workspaces, panes, agents, and sidebars. This differs from `herdr remote-handoff`, which deliberately creates a visible remote workspace.
 
 ```toml
 [remote]
 auto_remote_handoff = true
 ```
 
-On stop, Herdr persists one resume record per pane (SSH target, remote session, remote terminal, and local placement), asks each remote host to hand its panes back, and only then shuts down. Panes that cannot be handed off — for example a pane that owns a deeper nested SSH presentation — keep the destructive stop contract, and the stop output reports how many panes were handed off and how many were terminated. Records live under the Herdr state directory at `remote-resume/v1/`, scoped to the local session, and are removed once a pane is re-acquired or found to be gone.
+Before parking, Herdr transactionally writes one private recovery ticket per pane, including its exact workspace, tab, pane, and layout position. Session restore recreates that slot as a non-interactive restoring panel rather than a shell. A successful claim replaces the panel in place; it never falls back to the active tab.
 
-On the next start, Herdr re-acquires every pending record in the background: it reconnects, re-checks protocol and capabilities, re-links the peer, claims the recorded terminal, and places the attach pane back where the original lived, closing the placeholder shell session restore left in its slot. Automatic re-acquire cannot prompt, so it only works with non-interactive SSH authentication (keys or agent). Records that need a password or MFA stay pending with their last error; resume them interactively:
+Each terminal restores independently. Herdr retries with bounded backoff for 120 seconds from that terminal's admitted attempt. A failure then changes only that panel to **Timed out**, sends one notification, and waits for Retry or the next startup. Closing the panel discards its local ticket; if the remote host cannot confirm termination, the still-hidden terminal becomes a discoverable orphan. `remote-resume` lists or retries tickets without changing unrelated timers:
 
 ```bash
 herdr remote-resume            # retry every pending pane, prompting for SSH auth as needed
@@ -266,7 +266,9 @@ herdr remote-resume --peer workbox
 herdr remote-resume --list     # show pending panes without resuming
 ```
 
-This upgrades *graceful* stops only. A crash, power loss, or network failure still terminates delegated panes under the existing contract, because no handoff can run. `herdr update --handoff` remains blocked by active presentations; hand remote panes back or close them before updating. Nested SSH chains unwind only one hop: the directly owned pane is handed off, and deeper panes are terminated on stop.
+When a later managed SSH connection finds parked terminals whose local tickets were discarded, or when a client attaches to the owning remote server, Herdr opens an orphan review. **Retain** keeps a terminal hidden and reminds again on the next qualifying connection, **Terminate** stops it, and **Promote** makes it visible in the session showing the review. `herdr terminal parked list|promote|terminate` provides the same remote-host administration. A remote machine or server stop destroys its PTYs; after it returns Herdr reports those tickets as ended rather than inventing replacement shells.
+
+Normal `session delete` refuses sessions with recovery tickets. `session delete --force` discards them and reports the possible orphan count. This feature upgrades graceful local stops only; a local crash cannot run the parking transaction.
 
 ## Direct terminal attach
 

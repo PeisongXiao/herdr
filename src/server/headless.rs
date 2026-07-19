@@ -2653,6 +2653,8 @@ impl HeadlessServer {
                 }
                 if first_app_client {
                     self.app.mark_git_status_refresh_due(Instant::now());
+                    #[cfg(unix)]
+                    self.app.show_local_parked_terminal_review();
                 }
                 self.sync_foreground_client_state();
                 self.resize_shared_runtime_to_effective_size();
@@ -3778,6 +3780,10 @@ impl HeadlessServer {
         changed |= self.app.expire_incoming_peer_leases(now);
         changed |= self.app.expire_remote_owner_leases(now);
         changed |= self.app.expire_remote_presentations(now);
+        #[cfg(unix)]
+        {
+            changed |= self.app.expire_remote_restore_queue(now);
+        }
 
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.

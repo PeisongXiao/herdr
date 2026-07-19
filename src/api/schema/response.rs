@@ -11,11 +11,15 @@ use super::panes::{
     PaneMoveResult, PaneNeighborResult, PaneProcessInfo, PaneReadResult, PaneResizeResult,
     PaneSwapResult, PaneZoomResult,
 };
-use super::peers::{AgentAttachPrepared, PeerInfo, TerminalDelegationInfo};
+use super::peers::{
+    AgentAttachPrepared, PeerInfo, TerminalDelegationInfo, TerminalParkedInfo,
+    TerminalParkedResumePrepared,
+};
 use super::plugins::{
     InstalledPluginInfo, PluginActionInfo, PluginCommandLogInfo, PluginInvocationContext,
     PluginPaneInfo,
 };
+use super::recovery::TerminalRecoveryInfo;
 use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
@@ -121,6 +125,21 @@ pub enum ResponseResult {
     },
     TerminalDelegation {
         delegation: TerminalDelegationInfo,
+    },
+    TerminalParked {
+        parked: TerminalParkedInfo,
+    },
+    TerminalParkedList {
+        parked: Vec<TerminalParkedInfo>,
+    },
+    TerminalParkedResume {
+        prepared: TerminalParkedResumePrepared,
+    },
+    TerminalRecoveryList {
+        recoveries: Vec<TerminalRecoveryInfo>,
+    },
+    TerminalRecovery {
+        recovery: TerminalRecoveryInfo,
     },
     PaneInfo {
         pane: PaneInfo,

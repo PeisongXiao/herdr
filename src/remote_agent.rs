@@ -57,6 +57,41 @@ pub(crate) struct RemoteAgentStart {
     pub(crate) bridge: Option<PeerBridgeRuntime>,
 }
 
+#[derive(Debug)]
+#[cfg(unix)]
+pub(crate) enum RemoteParkedError {
+    Gone { code: String, message: String },
+    Unauthorized { code: String, message: String },
+    Busy { code: String, message: String },
+    Rejected { code: String, message: String },
+    Transport(io::Error),
+    InvalidResponse(String),
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for RemoteParkedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gone { code, message }
+            | Self::Unauthorized { code, message }
+            | Self::Busy { code, message }
+            | Self::Rejected { code, message } => write!(formatter, "{message} ({code})"),
+            Self::InvalidResponse(message) => formatter.write_str(message),
+            Self::Transport(error) => error.fmt(formatter),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for RemoteParkedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 impl RemoteAgentStart {
     pub(crate) fn rollback(&mut self) {
         #[cfg(unix)]
@@ -350,14 +385,77 @@ pub(crate) fn connect_shell(
     unix::connect_shell(params)
 }
 
-/// Ask the remote host to hand a delegated pane back into its own workspace
-/// list. Used by automatic handoff on graceful server stop.
 #[cfg(unix)]
-pub(crate) fn handoff_delegated_terminal(
+pub(crate) fn park_delegated_terminal(
     peer: &PeerInfo,
     delegation: &crate::api::schema::TerminalDelegationInfo,
-) -> io::Result<()> {
-    unix::handoff_delegated_terminal(peer, delegation)
+    park_id: &str,
+    origin_id: &str,
+    resume_token: &str,
+    discovery_token: &str,
+) -> Result<crate::api::schema::TerminalParkedInfo, RemoteParkedError> {
+    unix::park_delegated_terminal(
+        peer,
+        delegation,
+        park_id,
+        origin_id,
+        resume_token,
+        discovery_token,
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn list_parked_until(
+    peer: &PeerInfo,
+    origin_id: &str,
+    discovery_token: &str,
+    deadline: std::time::Instant,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<crate::api::schema::TerminalParkedInfo>, RemoteParkedError> {
+    unix::list_parked_until(peer, origin_id, discovery_token, deadline, cancelled)
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_parked_until(
+    peer: &PeerInfo,
+    park_id: &str,
+    origin_id: &str,
+    discovery_token: &str,
+    action: crate::api::schema::TerminalParkedResolveAction,
+    owner: Option<crate::api::schema::TerminalPresentationOwner>,
+    deadline: std::time::Instant,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<crate::api::schema::ResponseResult, RemoteParkedError> {
+    unix::resolve_parked_until(
+        peer,
+        park_id,
+        origin_id,
+        discovery_token,
+        action,
+        owner,
+        deadline,
+        cancelled,
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn reacquire_discovered_until(
+    peer: &PeerInfo,
+    parked: &crate::api::schema::TerminalParkedInfo,
+    origin_id: &str,
+    discovery_token: &str,
+    deadline: std::time::Instant,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<RemoteAgentStart, RemoteParkedError> {
+    unix::reacquire_discovered_until(
+        peer,
+        parked,
+        origin_id,
+        discovery_token,
+        deadline,
+        cancelled,
+    )
 }
 
 /// Re-acquire a pane that was handed off to its host by a previous graceful
@@ -368,8 +466,52 @@ pub(crate) fn handoff_delegated_terminal(
 pub(crate) fn reacquire(
     record: &crate::remote_resume::ResumeRecord,
     managed_control_path: Option<String>,
-) -> io::Result<RemoteAgentStart> {
-    unix::reacquire(record, managed_control_path)
+) -> Result<RemoteAgentStart, RemoteParkedError> {
+    unix::reacquire(record, managed_control_path).map_err(RemoteParkedError::Transport)
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reacquire_until(
+    record: &crate::remote_resume::ResumeRecord,
+    managed_control_path: Option<String>,
+    park_id: &str,
+    origin_id: &str,
+    resume_token: &str,
+    deadline: std::time::Instant,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<RemoteAgentStart, RemoteParkedError> {
+    unix::reacquire_until(
+        record,
+        managed_control_path,
+        park_id,
+        origin_id,
+        resume_token,
+        deadline,
+        cancelled,
+    )
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn terminate_parked_until(
+    record: &crate::remote_resume::ResumeRecord,
+    managed_control_path: Option<String>,
+    park_id: &str,
+    origin_id: &str,
+    discovery_token: &str,
+    deadline: std::time::Instant,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<(), RemoteParkedError> {
+    unix::terminate_parked_until(
+        record,
+        managed_control_path,
+        park_id,
+        origin_id,
+        discovery_token,
+        deadline,
+        cancelled,
+    )
 }
 
 /// Roll back a failed re-acquire: abandon the uncommitted delegation and stop
@@ -1349,25 +1491,463 @@ mod unix {
         })
     }
 
-    pub(super) fn handoff_delegated_terminal(
+    pub(super) fn park_delegated_terminal(
         peer: &PeerInfo,
         delegation: &crate::api::schema::TerminalDelegationInfo,
-    ) -> io::Result<()> {
-        let connection = ssh_connection_for_peer(peer)?;
-        let response = remote_api_request(
-            &connection,
-            serde_json::json!({
-                "id": "remote-terminal:delegate:handoff",
-                "method": "terminal.delegate.handoff",
-                "params": { "pane_id": delegation.pane_id },
+        park_id: &str,
+        origin_id: &str,
+        resume_token: &str,
+        discovery_token: &str,
+    ) -> Result<crate::api::schema::TerminalParkedInfo, RemoteParkedError> {
+        let connection = ssh_connection_for_peer(peer).map_err(RemoteParkedError::Transport)?;
+        let request = crate::api::schema::Request {
+            id: format!("remote-terminal:park:{}", delegation.terminal_id),
+            method: crate::api::schema::Method::TerminalDelegatePark(
+                crate::api::schema::TerminalDelegateParkParams {
+                    target: crate::api::schema::TerminalDelegationTarget {
+                        delegation_id: delegation.delegation_id.clone(),
+                        epoch: delegation.epoch,
+                    },
+                    park_id: park_id.to_string(),
+                    origin_id: origin_id.to_string(),
+                    resume_token: resume_token.to_string(),
+                    discovery_token: discovery_token.to_string(),
+                },
+            ),
+        };
+        let request = serde_json::to_value(request).map_err(|error| {
+            RemoteParkedError::InvalidResponse(format!(
+                "could not encode terminal park request: {error}"
+            ))
+        })?;
+        let response =
+            remote_api_request(&connection, request).map_err(RemoteParkedError::Transport)?;
+        decode_parked_result(&response)
+    }
+
+    pub(super) fn list_parked_until(
+        peer: &PeerInfo,
+        origin_id: &str,
+        discovery_token: &str,
+        deadline: std::time::Instant,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<crate::api::schema::TerminalParkedInfo>, RemoteParkedError> {
+        let connection = ssh_connection_for_peer(peer).map_err(RemoteParkedError::Transport)?;
+        let request = crate::api::schema::Request {
+            id: format!("remote-terminal:parked-list:{origin_id}"),
+            method: crate::api::schema::Method::TerminalParkedList(
+                crate::api::schema::TerminalParkedListParams {
+                    origin_id: origin_id.to_string(),
+                    discovery_token: discovery_token.to_string(),
+                },
+            ),
+        };
+        let request = serde_json::to_value(request).map_err(|error| {
+            RemoteParkedError::InvalidResponse(format!(
+                "could not encode parked terminal list request: {error}"
+            ))
+        })?;
+        let response = remote_api_request_until(&connection, request, deadline, cancelled)?;
+        if let Some(error) = decode_parked_error(&response) {
+            return Err(error);
+        }
+        serde_json::from_value(response["result"]["parked"].clone()).map_err(|error| {
+            RemoteParkedError::InvalidResponse(format!(
+                "remote parked terminal list was invalid: {error}"
+            ))
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn resolve_parked_until(
+        peer: &PeerInfo,
+        park_id: &str,
+        origin_id: &str,
+        discovery_token: &str,
+        action: crate::api::schema::TerminalParkedResolveAction,
+        owner: Option<crate::api::schema::TerminalPresentationOwner>,
+        deadline: std::time::Instant,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<crate::api::schema::ResponseResult, RemoteParkedError> {
+        let connection = ssh_connection_for_peer(peer).map_err(RemoteParkedError::Transport)?;
+        let request = crate::api::schema::Request {
+            id: format!("remote-terminal:parked-resolve:{park_id}"),
+            method: crate::api::schema::Method::TerminalParkedResolve(
+                crate::api::schema::TerminalParkedResolveParams {
+                    park_id: park_id.to_string(),
+                    origin_id: origin_id.to_string(),
+                    discovery_token: discovery_token.to_string(),
+                    action,
+                    owner,
+                },
+            ),
+        };
+        let request = serde_json::to_value(request).map_err(|error| {
+            RemoteParkedError::InvalidResponse(format!(
+                "could not encode parked terminal resolve request: {error}"
+            ))
+        })?;
+        let response = remote_api_request_until(&connection, request, deadline, cancelled)?;
+        if let Some(error) = decode_parked_error(&response) {
+            return Err(error);
+        }
+        serde_json::from_value(response["result"].clone()).map_err(|error| {
+            RemoteParkedError::InvalidResponse(format!(
+                "remote parked terminal resolve response was invalid: {error}"
+            ))
+        })
+    }
+
+    pub(super) fn reacquire_discovered_until(
+        peer: &PeerInfo,
+        parked: &crate::api::schema::TerminalParkedInfo,
+        origin_id: &str,
+        discovery_token: &str,
+        deadline: std::time::Instant,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<RemoteAgentStart, RemoteParkedError> {
+        let connection = ssh_connection_for_peer(peer).map_err(RemoteParkedError::Transport)?;
+        check_recovery_budget(deadline, cancelled)?;
+        validate_ssh_target(&connection.target).map_err(RemoteParkedError::Transport)?;
+        validate_managed_control_connection(&connection).map_err(RemoteParkedError::Transport)?;
+        validate_effective_ssh_config(&connection).map_err(RemoteParkedError::Transport)?;
+
+        let (registered_peer, mut bridge) =
+            start_reverse_peer_bridge(&connection).map_err(RemoteParkedError::Transport)?;
+        if let Err(error) = bridge.registration().register() {
+            let error = unmanaged_bridge_failure(&bridge.child, error);
+            bridge.stop(true);
+            return Err(RemoteParkedError::Transport(error));
+        }
+        drain_unmanaged_bridge_stderr(&bridge.child);
+        if let Err(error) = bridge.start_supervisor() {
+            bridge.stop(true);
+            return Err(RemoteParkedError::Transport(error));
+        }
+        if let Err(error) = check_recovery_budget(deadline, cancelled) {
+            bridge.stop(true);
+            return Err(error);
+        }
+
+        let owner_peer_id = local_peer_id();
+        let response = match resolve_parked_until(
+            peer,
+            &parked.park_id,
+            origin_id,
+            discovery_token,
+            crate::api::schema::TerminalParkedResolveAction::Promote,
+            Some(crate::api::schema::TerminalPresentationOwner {
+                peer_id: owner_peer_id.clone(),
+                pane_id: "remote-orphan-recovery".into(),
+                route: vec![owner_peer_id],
             }),
-        )?;
-        if let Some(message) = response["error"]["message"].as_str() {
-            return Err(io::Error::other(format!(
-                "remote Herdr could not hand off the terminal: {message}"
+            deadline,
+            cancelled,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                bridge.stop(true);
+                return Err(error);
+            }
+        };
+        let crate::api::schema::ResponseResult::TerminalParkedResume { prepared } = response else {
+            bridge.stop(true);
+            return Err(RemoteParkedError::InvalidResponse(
+                "remote orphan promotion did not return a resume lease".into(),
+            ));
+        };
+        if prepared.delegation.terminal_id != parked.terminal_id {
+            bridge.stop(true);
+            return Err(RemoteParkedError::InvalidResponse(
+                "remote orphan promotion returned a different terminal".into(),
+            ));
+        }
+        let agent = prepared.agent.ok_or_else(|| {
+            bridge.stop(true);
+            RemoteParkedError::InvalidResponse(
+                "parked orphan no longer contains agent metadata".into(),
+            )
+        })?;
+        let delegation = prepared.delegation;
+        let claim = crate::api::schema::TerminalDelegationClaim {
+            delegation_id: delegation.delegation_id.clone(),
+            epoch: delegation.epoch,
+        };
+        let attach_argv = super::ssh_attach_argv(
+            &connection.target,
+            &connection.ssh_args,
+            connection.managed_control_path.as_deref(),
+            connection.session.as_deref(),
+            &parked.terminal_id,
+            false,
+            Some(&claim),
+        );
+        let transport = AgentTransportInfo::Ssh {
+            target: connection.target.clone(),
+            ssh_args: connection.ssh_args.clone(),
+            managed_control_path: connection.managed_control_path.clone(),
+            session: connection.session.clone(),
+            remote_terminal_id: parked.terminal_id.clone(),
+            remote_pane_id: parked.pane_id.clone(),
+            remote_agent: agent.agent.clone(),
+            remote_cwd: agent.cwd.clone(),
+        };
+        Ok(RemoteAgentStart {
+            agent,
+            delegation,
+            attach_argv,
+            transport,
+            peer: Some(registered_peer),
+            bridge: Some(bridge),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reacquire_until(
+        record: &crate::remote_resume::ResumeRecord,
+        managed_control_path: Option<String>,
+        park_id: &str,
+        origin_id: &str,
+        resume_token: &str,
+        deadline: std::time::Instant,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<RemoteAgentStart, RemoteParkedError> {
+        let connection = SshConnection {
+            target: record.ssh.target.clone(),
+            ssh_args: record.ssh.ssh_args.clone(),
+            managed_control_path,
+            session: Some(
+                explicit_remote_session(record.ssh.session.as_deref())
+                    .map_err(RemoteParkedError::Transport)?,
+            ),
+        };
+        check_recovery_budget(deadline, cancelled)?;
+        validate_ssh_target(&connection.target).map_err(RemoteParkedError::Transport)?;
+        validate_managed_control_connection(&connection).map_err(RemoteParkedError::Transport)?;
+        validate_effective_ssh_config(&connection).map_err(RemoteParkedError::Transport)?;
+
+        let status_request = crate::api::schema::Request {
+            id: format!("remote-terminal:parked-status:{park_id}"),
+            method: crate::api::schema::Method::TerminalParkedStatus(
+                crate::api::schema::TerminalParkedTarget {
+                    park_id: park_id.to_string(),
+                    origin_id: origin_id.to_string(),
+                    resume_token: resume_token.to_string(),
+                },
+            ),
+        };
+        let status_request = serde_json::to_value(status_request).map_err(|error| {
+            RemoteParkedError::InvalidResponse(format!(
+                "could not encode parked terminal status request: {error}"
+            ))
+        })?;
+        let status_response =
+            remote_api_request_until(&connection, status_request, deadline, cancelled)?;
+        let parked = decode_parked_result(&status_response)?;
+        if parked.terminal_id != record.remote_terminal_id {
+            return Err(RemoteParkedError::InvalidResponse(
+                "parked terminal identity does not match the recovery ticket".into(),
+            ));
+        }
+
+        check_recovery_budget(deadline, cancelled)?;
+        let (peer, mut bridge) =
+            start_reverse_peer_bridge(&connection).map_err(RemoteParkedError::Transport)?;
+        if let Err(error) = bridge.registration().register() {
+            let error = unmanaged_bridge_failure(&bridge.child, error);
+            bridge.stop(true);
+            return Err(RemoteParkedError::Transport(error));
+        }
+        drain_unmanaged_bridge_stderr(&bridge.child);
+        if let Err(error) = bridge.start_supervisor() {
+            bridge.stop(true);
+            return Err(RemoteParkedError::Transport(error));
+        }
+        if let Err(error) = check_recovery_budget(deadline, cancelled) {
+            bridge.stop(true);
+            return Err(error);
+        }
+
+        let owner_peer_id = local_peer_id();
+        let resume_request = crate::api::schema::Request {
+            id: format!("remote-terminal:parked-resume:{park_id}"),
+            method: crate::api::schema::Method::TerminalParkedResume(
+                crate::api::schema::TerminalParkedResumeParams {
+                    target: crate::api::schema::TerminalParkedTarget {
+                        park_id: park_id.to_string(),
+                        origin_id: origin_id.to_string(),
+                        resume_token: resume_token.to_string(),
+                    },
+                    owner: crate::api::schema::TerminalPresentationOwner {
+                        peer_id: owner_peer_id.clone(),
+                        pane_id: "remote-resume".into(),
+                        route: vec![owner_peer_id],
+                    },
+                },
+            ),
+        };
+        let resume_request = serde_json::to_value(resume_request).map_err(|error| {
+            RemoteParkedError::InvalidResponse(format!(
+                "could not encode parked terminal resume request: {error}"
+            ))
+        })?;
+        let response =
+            match remote_api_request_until(&connection, resume_request, deadline, cancelled) {
+                Ok(response) => response,
+                Err(error) => {
+                    bridge.stop(true);
+                    return Err(error);
+                }
+            };
+        if let Some(error) = decode_parked_error(&response) {
+            bridge.stop(true);
+            return Err(error);
+        }
+        let prepared: crate::api::schema::TerminalParkedResumePrepared =
+            serde_json::from_value(response["result"]["prepared"].clone()).map_err(|error| {
+                bridge.stop(true);
+                RemoteParkedError::InvalidResponse(format!(
+                    "remote parked resume returned invalid data: {error}"
+                ))
+            })?;
+        let agent = prepared.agent.ok_or_else(|| {
+            bridge.stop(true);
+            RemoteParkedError::InvalidResponse(
+                "parked terminal no longer contains agent metadata".into(),
+            )
+        })?;
+        let delegation = prepared.delegation;
+        let delegation_claim = crate::api::schema::TerminalDelegationClaim {
+            delegation_id: delegation.delegation_id.clone(),
+            epoch: delegation.epoch,
+        };
+        let attach_argv = super::ssh_attach_argv(
+            &connection.target,
+            &connection.ssh_args,
+            connection.managed_control_path.as_deref(),
+            connection.session.as_deref(),
+            &record.remote_terminal_id,
+            false,
+            Some(&delegation_claim),
+        );
+        let transport = AgentTransportInfo::Ssh {
+            target: connection.target.clone(),
+            ssh_args: connection.ssh_args.clone(),
+            managed_control_path: connection.managed_control_path.clone(),
+            session: connection.session.clone(),
+            remote_terminal_id: record.remote_terminal_id.clone(),
+            remote_pane_id: record.remote_pane_id.clone(),
+            remote_agent: agent.agent.clone(),
+            remote_cwd: agent.cwd.clone(),
+        };
+        Ok(RemoteAgentStart {
+            agent,
+            delegation,
+            attach_argv,
+            transport,
+            peer: Some(peer),
+            bridge: Some(bridge),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn terminate_parked_until(
+        record: &crate::remote_resume::ResumeRecord,
+        managed_control_path: Option<String>,
+        park_id: &str,
+        origin_id: &str,
+        discovery_token: &str,
+        deadline: std::time::Instant,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), RemoteParkedError> {
+        let connection = SshConnection {
+            target: record.ssh.target.clone(),
+            ssh_args: record.ssh.ssh_args.clone(),
+            managed_control_path,
+            session: Some(
+                explicit_remote_session(record.ssh.session.as_deref())
+                    .map_err(RemoteParkedError::Transport)?,
+            ),
+        };
+        validate_ssh_target(&connection.target).map_err(RemoteParkedError::Transport)?;
+        validate_managed_control_connection(&connection).map_err(RemoteParkedError::Transport)?;
+        let request = crate::api::schema::Request {
+            id: format!("remote-terminal:parked-terminate:{park_id}"),
+            method: crate::api::schema::Method::TerminalParkedResolve(
+                crate::api::schema::TerminalParkedResolveParams {
+                    park_id: park_id.to_string(),
+                    origin_id: origin_id.to_string(),
+                    discovery_token: discovery_token.to_string(),
+                    action: crate::api::schema::TerminalParkedResolveAction::Terminate,
+                    owner: None,
+                },
+            ),
+        };
+        let request = serde_json::to_value(request).map_err(|error| {
+            RemoteParkedError::InvalidResponse(format!(
+                "could not encode parked terminal terminate request: {error}"
+            ))
+        })?;
+        let response = remote_api_request_until(&connection, request, deadline, cancelled)?;
+        if let Some(error) = decode_parked_error(&response) {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_recovery_budget(
+        deadline: std::time::Instant,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), RemoteParkedError> {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(RemoteParkedError::Transport(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "remote terminal recovery was cancelled",
+            )));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(RemoteParkedError::Transport(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "remote terminal recovery timed out",
             )));
         }
         Ok(())
+    }
+
+    fn decode_parked_result(
+        response: &serde_json::Value,
+    ) -> Result<crate::api::schema::TerminalParkedInfo, RemoteParkedError> {
+        if let Some(error) = decode_parked_error(response) {
+            return Err(error);
+        }
+        serde_json::from_value(response["result"]["parked"].clone()).map_err(|error| {
+            RemoteParkedError::InvalidResponse(format!(
+                "remote parked terminal response was invalid: {error}"
+            ))
+        })
+    }
+
+    fn decode_parked_error(response: &serde_json::Value) -> Option<RemoteParkedError> {
+        let error = response.get("error")?.as_object()?;
+        let code = error
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("remote_terminal_rejected")
+            .to_string();
+        let message = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("remote terminal operation failed")
+            .to_string();
+        Some(match code.as_str() {
+            "terminal_parked_not_found" | "terminal_parked_gone" => {
+                RemoteParkedError::Gone { code, message }
+            }
+            "terminal_parked_unauthorized" => RemoteParkedError::Unauthorized { code, message },
+            "terminal_parked_busy" => RemoteParkedError::Busy { code, message },
+            _ => RemoteParkedError::Rejected { code, message },
+        })
     }
 
     pub(super) fn reacquire(
@@ -1461,20 +2041,9 @@ mod unix {
 
     pub(super) fn rollback_reacquire(start: &mut RemoteAgentStart) {
         if let Some(mut bridge) = start.bridge.take() {
-            let connection = bridge.connection.clone();
-            let terminate = crate::api::schema::Request {
-                id: "remote-terminal:delegate:abandon".into(),
-                method: crate::api::schema::Method::TerminalDelegateTerminate(
-                    crate::api::schema::TerminalDelegationTarget {
-                        delegation_id: start.delegation.delegation_id.clone(),
-                        epoch: start.delegation.epoch,
-                    },
-                ),
-            };
-            let value = serde_json::to_value(terminate);
-            if let Ok(value) = value {
-                let _ = remote_api_request(&connection, value);
-            }
+            // A resumed delegation carries its recovery capability on the
+            // owning server. Disconnecting its route returns it to the parked
+            // registry instead of terminating the PTY.
             bridge.stop(true);
         }
     }
@@ -2878,6 +3447,28 @@ mod unix {
         connection: &SshConnection,
         request: serde_json::Value,
     ) -> io::Result<serde_json::Value> {
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        remote_api_request_bounded(connection, request, SSH_API_TIMEOUT, &cancelled)
+    }
+
+    fn remote_api_request_until(
+        connection: &SshConnection,
+        request: serde_json::Value,
+        deadline: std::time::Instant,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<serde_json::Value, RemoteParkedError> {
+        check_recovery_budget(deadline, cancelled)?;
+        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+        remote_api_request_bounded(connection, request, timeout, cancelled)
+            .map_err(RemoteParkedError::Transport)
+    }
+
+    fn remote_api_request_bounded(
+        connection: &SshConnection,
+        request: serde_json::Value,
+        timeout: Duration,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> io::Result<serde_json::Value> {
         let expected_id = request
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -2894,7 +3485,7 @@ mod unix {
             })?;
             writeln!(stdin, "{request}")?;
         }
-        let output = wait_with_timeout(child, SSH_API_TIMEOUT)?;
+        let output = wait_with_timeout_cancelled(child, timeout, cancelled)?;
         if !output.status.success() {
             return Err(command_failed("remote api request failed", output));
         }
@@ -2923,8 +3514,17 @@ mod unix {
     }
 
     fn wait_with_timeout(
+        child: std::process::Child,
+        timeout: Duration,
+    ) -> io::Result<std::process::Output> {
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        wait_with_timeout_cancelled(child, timeout, &cancelled)
+    }
+
+    fn wait_with_timeout_cancelled(
         mut child: std::process::Child,
         timeout: Duration,
+        cancelled: &std::sync::atomic::AtomicBool,
     ) -> io::Result<std::process::Output> {
         use std::os::unix::process::ExitStatusExt as _;
 
@@ -2932,6 +3532,7 @@ mod unix {
         let stderr = child.stderr.take().map(spawn_bounded_output_reader);
         let start = std::time::Instant::now();
         let mut timed_out = false;
+        let mut was_cancelled = false;
         let status = 'wait: loop {
             if let Some(status) = child.try_wait()? {
                 break Some(status);
@@ -2951,6 +3552,12 @@ mod unix {
                         Err(err) => return Err(err),
                     }
                 }
+            }
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                was_cancelled = true;
+                kill_ssh_process_group(&mut child);
+                let _ = child.kill();
+                break 'wait child.try_wait()?;
             }
             thread::sleep(Duration::from_millis(50));
         };
@@ -2978,6 +3585,12 @@ mod unix {
         };
         if timed_out {
             return Err(command_failed("ssh command timed out", output));
+        }
+        if was_cancelled {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "remote terminal recovery was cancelled",
+            ));
         }
         Ok(output)
     }

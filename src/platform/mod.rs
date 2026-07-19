@@ -48,6 +48,27 @@ pub(crate) const fn capabilities() -> PlatformCapabilities {
     }
 }
 
+/// RAII wrapper for an OS-level advisory exclusive lock on an open file.
+///
+/// Callers retain responsibility for path selection, secure file creation,
+/// permissions, and deciding which operations belong in the critical section.
+#[cfg(unix)]
+pub(crate) struct ExclusiveFileLock {
+    _platform: unix::ExclusiveFileLock,
+}
+
+#[cfg(unix)]
+impl ExclusiveFileLock {
+    pub(crate) fn acquire(
+        file: std::fs::File,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<Self> {
+        Ok(Self {
+            _platform: unix::ExclusiveFileLock::acquire(file, timeout)?,
+        })
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn detach_server_daemon_command(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -132,6 +153,9 @@ pub(crate) fn read_limited_reader(
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
+
+#[cfg(unix)]
+mod unix;
 
 #[cfg(target_os = "macos")]
 mod macos;

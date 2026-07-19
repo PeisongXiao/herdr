@@ -9,7 +9,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 3;
+pub(super) const SNAPSHOT_VERSION: u32 = 4;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -105,6 +105,12 @@ pub struct PaneSnapshot {
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remote_restore_reservation: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,6 +393,10 @@ fn capture_tab(
                 agent_name,
                 agent_session,
                 launch_argv,
+                remote_restore_reservation: tab
+                    .panes
+                    .get(id)
+                    .is_some_and(|pane| pane.remote_restore_reservation),
             },
         );
     }
@@ -629,6 +639,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                remote_restore_reservation: false,
             },
         );
         panes.insert(
@@ -639,6 +650,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                remote_restore_reservation: false,
             },
         );
 
@@ -1235,6 +1247,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                remote_restore_reservation: false,
             },
         );
         panes.insert(
@@ -1247,6 +1260,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                remote_restore_reservation: false,
             },
         );
 

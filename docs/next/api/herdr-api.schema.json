@@ -3894,6 +3894,33 @@
           ],
           "type": "object"
         },
+        "TerminalDelegateParkParams": {
+          "properties": {
+            "discovery_token": {
+              "type": "string"
+            },
+            "origin_id": {
+              "type": "string"
+            },
+            "park_id": {
+              "type": "string"
+            },
+            "resume_token": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/schemas/request/$defs/TerminalDelegationTarget"
+            }
+          },
+          "required": [
+            "target",
+            "park_id",
+            "origin_id",
+            "resume_token",
+            "discovery_token"
+          ],
+          "type": "object"
+        },
         "TerminalDelegationClaim": {
           "properties": {
             "delegation_id": {
@@ -3928,6 +3955,134 @@
           ],
           "type": "object"
         },
+        "TerminalParkedAdminListParams": {
+          "properties": {
+            "admin_token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "admin_token"
+          ],
+          "type": "object"
+        },
+        "TerminalParkedAdminResolveParams": {
+          "properties": {
+            "action": {
+              "$ref": "#/schemas/request/$defs/TerminalParkedResolveAction"
+            },
+            "admin_token": {
+              "type": "string"
+            },
+            "park_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "park_id",
+            "admin_token",
+            "action"
+          ],
+          "type": "object"
+        },
+        "TerminalParkedListParams": {
+          "properties": {
+            "discovery_token": {
+              "type": "string"
+            },
+            "origin_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "origin_id",
+            "discovery_token"
+          ],
+          "type": "object"
+        },
+        "TerminalParkedResolveAction": {
+          "enum": [
+            "retain",
+            "terminate",
+            "promote"
+          ],
+          "type": "string"
+        },
+        "TerminalParkedResolveParams": {
+          "properties": {
+            "action": {
+              "$ref": "#/schemas/request/$defs/TerminalParkedResolveAction"
+            },
+            "discovery_token": {
+              "type": "string"
+            },
+            "origin_id": {
+              "type": "string"
+            },
+            "owner": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/TerminalPresentationOwner"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "park_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "park_id",
+            "origin_id",
+            "discovery_token",
+            "action"
+          ],
+          "type": "object"
+        },
+        "TerminalParkedResumeParams": {
+          "properties": {
+            "origin_id": {
+              "type": "string"
+            },
+            "owner": {
+              "$ref": "#/schemas/request/$defs/TerminalPresentationOwner"
+            },
+            "park_id": {
+              "type": "string"
+            },
+            "resume_token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "park_id",
+            "origin_id",
+            "resume_token",
+            "owner"
+          ],
+          "type": "object"
+        },
+        "TerminalParkedTarget": {
+          "properties": {
+            "origin_id": {
+              "type": "string"
+            },
+            "park_id": {
+              "type": "string"
+            },
+            "resume_token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "park_id",
+            "origin_id",
+            "resume_token"
+          ],
+          "type": "object"
+        },
         "TerminalPresentationOwner": {
           "properties": {
             "pane_id": {
@@ -3946,6 +4101,20 @@
           "required": [
             "peer_id",
             "pane_id"
+          ],
+          "type": "object"
+        },
+        "TerminalRecoveryListParams": {
+          "type": "object"
+        },
+        "TerminalRecoveryTarget": {
+          "properties": {
+            "remote_terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "remote_terminal_id"
           ],
           "type": "object"
         },
@@ -4950,6 +5119,182 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/TerminalDelegateHandoffParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.park",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalDelegateParkParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.parked.status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalParkedTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.parked.resume",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalParkedResumeParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.parked.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalParkedListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.parked.resolve",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalParkedResolveParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.parked.admin.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalParkedAdminListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.delegate.parked.admin.resolve",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalParkedAdminResolveParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.recovery.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalRecoveryListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.recovery.status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalRecoveryTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.recovery.retry",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalRecoveryTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "terminal.recovery.discard",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TerminalRecoveryTarget"
             }
           },
           "required": [
@@ -9121,6 +9466,92 @@
             },
             {
               "properties": {
+                "parked": {
+                  "$ref": "#/schemas/success_response/$defs/TerminalParkedInfo"
+                },
+                "type": {
+                  "const": "terminal_parked",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "parked"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "parked": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/TerminalParkedInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "terminal_parked_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "parked"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "prepared": {
+                  "$ref": "#/schemas/success_response/$defs/TerminalParkedResumePrepared"
+                },
+                "type": {
+                  "const": "terminal_parked_resume",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "prepared"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "recoveries": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/TerminalRecoveryInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "terminal_recovery_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "recoveries"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "recovery": {
+                  "$ref": "#/schemas/success_response/$defs/TerminalRecoveryInfo"
+                },
+                "type": {
+                  "const": "terminal_recovery",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "recovery"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane": {
                   "$ref": "#/schemas/success_response/$defs/PaneInfo"
                 },
@@ -10050,12 +10481,65 @@
           "enum": [
             "pending",
             "active",
+            "parked",
             "taken_over",
             "handed_off",
+            "promoted",
             "terminated",
             "failed"
           ],
           "type": "string"
+        },
+        "TerminalParkedInfo": {
+          "properties": {
+            "origin_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "park_id": {
+              "type": "string"
+            },
+            "resuming": {
+              "type": "boolean"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/TerminalDelegationStatus"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "park_id",
+            "terminal_id",
+            "pane_id",
+            "origin_id",
+            "status"
+          ],
+          "type": "object"
+        },
+        "TerminalParkedResumePrepared": {
+          "properties": {
+            "agent": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "delegation": {
+              "$ref": "#/schemas/success_response/$defs/TerminalDelegationInfo"
+            }
+          },
+          "required": [
+            "delegation"
+          ],
+          "type": "object"
         },
         "TerminalPresentationOwner": {
           "properties": {
@@ -10077,6 +10561,44 @@
             "pane_id"
           ],
           "type": "object"
+        },
+        "TerminalRecoveryInfo": {
+          "properties": {
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "peer_id": {
+              "type": "string"
+            },
+            "remote_terminal_id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/TerminalRecoveryStatus"
+            }
+          },
+          "required": [
+            "remote_terminal_id",
+            "peer_id",
+            "status"
+          ],
+          "type": "object"
+        },
+        "TerminalRecoveryStatus": {
+          "enum": [
+            "pending",
+            "queued",
+            "restoring",
+            "timed_out",
+            "retryable",
+            "ended",
+            "discarding",
+            "cleanup_pending"
+          ],
+          "type": "string"
         },
         "WorkspaceInfo": {
           "properties": {

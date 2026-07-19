@@ -6,6 +6,7 @@ use crate::api::client::{ApiClient, ApiClientError};
 #[cfg(unix)]
 use crate::api::schema::{
     AgentAttachInfo, PeerConnectSshParams, PeerDisconnectSshParams, PeerKeepaliveSshParams,
+    TerminalParkedAdminListParams, TerminalParkedAdminResolveParams, TerminalParkedResolveAction,
 };
 use crate::api::schema::{
     AgentStatus, ClientWindowTitleSetParams, EmptyParams, EventData, EventMatch, EventsWaitParams,
@@ -411,6 +412,7 @@ fn run_terminal_command(args: &[String]) -> std::io::Result<i32> {
         "attach" => terminal_attach(&args[1..]),
         "shell" => terminal_shell(&args[1..]),
         "session" => terminal_session(&args[1..]),
+        "parked" => terminal_parked(&args[1..]),
         "title" => terminal_title(&args[1..]),
         "help" | "--help" | "-h" => {
             print_terminal_help();
@@ -421,6 +423,106 @@ fn run_terminal_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+#[cfg(unix)]
+fn terminal_parked(args: &[String]) -> std::io::Result<i32> {
+    let Some(subcommand) = args.first().map(String::as_str) else {
+        print_terminal_parked_help();
+        return Ok(2);
+    };
+    let admin = crate::remote_resume::LocalAdminTokenStore::open_global()?;
+    let admin_token = admin.token().expose_secret().to_string();
+    match subcommand {
+        "list" => {
+            let json = match &args[1..] {
+                [] => false,
+                [flag] if flag == "--json" => true,
+                _ => {
+                    eprintln!("usage: herdr terminal parked list [--json]");
+                    return Ok(2);
+                }
+            };
+            let response = send_request(&Request {
+                id: "cli:terminal:parked:list".into(),
+                method: Method::TerminalParkedAdminList(TerminalParkedAdminListParams {
+                    admin_token,
+                }),
+            })?;
+            if let Some(message) = response["error"]["message"].as_str() {
+                eprintln!("parked terminal list failed: {message}");
+                return Ok(1);
+            }
+            let parked = response["result"]["parked"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if json {
+                _print_json(&serde_json::json!({ "parked": parked }));
+            } else if parked.is_empty() {
+                println!("no parked terminals");
+            } else {
+                println!("PARK_ID\tTERMINAL_ID\tPANE_ID\tSTATUS");
+                for terminal in parked {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        terminal["park_id"].as_str().unwrap_or("-"),
+                        terminal["terminal_id"].as_str().unwrap_or("-"),
+                        terminal["pane_id"].as_str().unwrap_or("-"),
+                        terminal["status"].as_str().unwrap_or("unknown"),
+                    );
+                }
+            }
+            Ok(0)
+        }
+        "promote" | "terminate" => {
+            let [park_id] = &args[1..] else {
+                eprintln!("usage: herdr terminal parked {subcommand} <park_id>");
+                return Ok(2);
+            };
+            let action = if subcommand == "promote" {
+                TerminalParkedResolveAction::Promote
+            } else {
+                TerminalParkedResolveAction::Terminate
+            };
+            let response = send_request(&Request {
+                id: format!("cli:terminal:parked:{subcommand}"),
+                method: Method::TerminalParkedAdminResolve(TerminalParkedAdminResolveParams {
+                    park_id: park_id.clone(),
+                    admin_token,
+                    action,
+                }),
+            })?;
+            if let Some(message) = response["error"]["message"].as_str() {
+                eprintln!("parked terminal {subcommand} failed: {message}");
+                return Ok(1);
+            }
+            println!("{subcommand}d parked terminal {park_id}");
+            Ok(0)
+        }
+        "help" | "--help" | "-h" => {
+            print_terminal_parked_help();
+            Ok(0)
+        }
+        _ => {
+            print_terminal_parked_help();
+            Ok(2)
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn terminal_parked(_args: &[String]) -> std::io::Result<i32> {
+    eprintln!("herdr terminal parked is only supported on Unix");
+    Ok(1)
+}
+
+#[cfg(unix)]
+fn print_terminal_parked_help() {
+    eprintln!("herdr terminal parked commands:");
+    eprintln!("  herdr terminal parked list [--json]");
+    eprintln!("  herdr terminal parked promote <park_id>");
+    eprintln!("  herdr terminal parked terminate <park_id>");
 }
 
 fn terminal_shell(args: &[String]) -> std::io::Result<i32> {
@@ -565,21 +667,29 @@ fn session_stop(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn session_delete(args: &[String]) -> std::io::Result<i32> {
-    let (name, json) =
-        match parse_session_name_and_json(args, "usage: herdr session delete <name> [--json]") {
-            Ok(parsed) => parsed,
-            Err(code) => return Ok(code),
-        };
+    let (name, json, force) = match parse_session_delete_options(args) {
+        Ok(parsed) => parsed,
+        Err(code) => return Ok(code),
+    };
 
-    match crate::session::delete_session(&name) {
-        Ok(session) => {
+    match crate::session::delete_session_with_options(&name, force) {
+        Ok(outcome) => {
             if json {
                 _print_json(&serde_json::json!({
                     "deleted": true,
-                    "session": session,
+                    "session": outcome.session,
+                    "discarded_recovery_tickets": outcome.discarded_recovery_tickets,
+                    "orphaned_remote_terminals": outcome.orphaned_remote_terminals,
                 }));
+            } else if force {
+                println!(
+                    "deleted session {}; discarded {} recovery ticket(s), {} remote terminal(s) may remain orphaned",
+                    outcome.session.name,
+                    outcome.discarded_recovery_tickets,
+                    outcome.orphaned_remote_terminals
+                );
             } else {
-                println!("deleted session {}", session.name);
+                println!("deleted session {}", outcome.session.name);
             }
             Ok(0)
         }
@@ -1490,6 +1600,29 @@ fn parse_session_name_and_json(args: &[String], usage: &str) -> Result<(String, 
     Ok((name, json))
 }
 
+fn parse_session_delete_options(args: &[String]) -> Result<(String, bool, bool), i32> {
+    const USAGE: &str = "usage: herdr session delete <name> [--force] [--json]";
+    let mut name = None;
+    let mut json = false;
+    let mut force = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--force" => force = true,
+            _ if name.is_none() && !arg.starts_with('-') => name = Some(arg.clone()),
+            _ => {
+                eprintln!("{USAGE}");
+                return Err(2);
+            }
+        }
+    }
+    let Some(name) = name else {
+        eprintln!("{USAGE}");
+        return Err(2);
+    };
+    Ok((name, json, force))
+}
+
 fn print_session_table(sessions: &[crate::session::SessionInfo]) {
     println!("{:<20} {:<8} {:<48} socket", "name", "status", "directory");
     for session in sessions {
@@ -1531,6 +1664,9 @@ fn print_terminal_help() {
     eprintln!("  herdr terminal shell [--label LABEL]");
     eprintln!("  herdr terminal session control <target> [--takeover] [--cols N] [--rows N]");
     eprintln!("  herdr terminal session observe <target> [--cols N] [--rows N]");
+    eprintln!("  herdr terminal parked list [--json]");
+    eprintln!("  herdr terminal parked promote <park_id>");
+    eprintln!("  herdr terminal parked terminate <park_id>");
     eprintln!("  herdr terminal title set <title>");
     eprintln!("  herdr terminal title clear");
     eprintln!("  detach from direct attach with ctrl+b q; send literal ctrl+b with ctrl+b ctrl+b");
@@ -1549,7 +1685,7 @@ fn print_session_help() {
     eprintln!("  herdr session list [--json]");
     eprintln!("  herdr session attach <name>");
     eprintln!("  herdr session stop <name> [--json]");
-    eprintln!("  herdr session delete <name> [--json]");
+    eprintln!("  herdr session delete <name> [--force] [--json]");
     eprintln!("  use 'default' as <name> to target the default session for stop");
 }
 
@@ -1559,6 +1695,30 @@ fn _print_json<T: Serialize>(value: &T) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_session_delete_force_independent_of_flag_order() {
+        assert_eq!(
+            super::parse_session_delete_options(&[
+                "--json".to_string(),
+                "work".to_string(),
+                "--force".to_string(),
+            ]),
+            Ok(("work".to_string(), true, true))
+        );
+        assert_eq!(
+            super::parse_session_delete_options(&["work".to_string()]),
+            Ok(("work".to_string(), false, false))
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_session_delete_flags() {
+        assert_eq!(
+            super::parse_session_delete_options(&["work".to_string(), "--discard".to_string(),]),
+            Err(2)
+        );
+    }
+
     #[test]
     fn parses_channel_set_argument() {
         assert_eq!(

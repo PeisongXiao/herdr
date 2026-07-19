@@ -236,18 +236,18 @@ plain pane `ssh` bridge 随前台 attach 结束。wrapper 每三秒续租一次 
 
 同一 peer 的并发连接独立跟踪,移除一个不会终止其他连接。清理时,每个 bridge 只有在远端注册仍指向自己的 forwarded socket 时才 unregister,因此旧清理不会抹掉替代连接。socket/control 清理在后台 worker 继续进行。peer 是运行时状态,不是持久配对:`peer health` 刷新状态,`peer unregister` 移除该 peer 的活动 bridge,服务器重启后必须重连。活动或 pending presentation、peer 链接及未完成清理会阻止 server live handoff。通过已移除或过期 route 拥有的委派窗格会被终止,不会隐形运行;需要保留时必须在断开前 handoff。
 
-## 服务器停止时自动 handoff
+## 服务器停止时自动 parking
 
-委派中的远程窗格通常与其所有者共存亡:停止本地 Herdr 服务器会终止远程窗格及其进程。设置 `[remote] auto_remote_handoff = true` 后,服务器正常停止时会把每个委派窗格交还给所在主机(与单个窗格的 `herdr remote-handoff` 相同),并在下次服务器启动时把它重新取回原来的工作区与标签页。它面向的是关闭本地机器、同时让远程主机继续运行的场景。
+委派远程窗格通常与 owner 共存亡。设置 `[remote] auto_remote_handoff = true` 后,正常停止会把每个 eligible pane 隐藏地 park 在所在主机。native PTY 与进程继续运行,但不会出现在远程 workspace、pane、agent 或 sidebar。它不同于会创建可见远程工作区的 manual `remote-handoff`。
 
 ```toml
 [remote]
 auto_remote_handoff = true
 ```
 
-停止时,Herdr 会为每个窗格持久化一条 resume 记录(SSH 目标、远程会话、远程终端与本地位置),向各远程主机请求交还后才关闭。无法交还的窗格(例如拥有更深层嵌套 SSH 展示的窗格)仍遵循原有的销毁约定,停止输出会报告交还与终止的数量。记录按本地会话保存在 Herdr 状态目录的 `remote-resume/v1/` 下,在窗格被取回或确认已不存在后删除。
+parking 前,Herdr transactionally 保存 private recovery ticket,其中包含准确 workspace、tab、pane 与 layout position。session restore 不启动 shell,而是在该 slot 创建 non-interactive restoring panel。claim 成功时原位替换,绝不会 fallback 到 active tab。
 
-下次启动时,Herdr 在后台取回所有 pending 记录:重新连接、复查协议与能力、重建 peer 链接、claim 记录中的终端,并把 attach 窗格放回原来的位置,同时关闭会话恢复留下的占位 shell。自动取回无法交互输入,因此只适用于非交互式 SSH 认证(密钥或 agent)。需要密码或 MFA 的记录会带着最近的错误保持 pending,可以交互式取回:
+每个 terminal 独立恢复。从该 attempt 被 admit 起,Herdr 使用 bounded backoff 重试 120 秒。失败后只有对应 panel 进入 **Timed out** 并通知一次,等待 Retry 或下次启动。Close 会丢弃本地 ticket;远端无法确认终止时,仍存活的 hidden terminal 会成为可发现 orphan:
 
 ```bash
 herdr remote-resume            # 重试所有 pending 窗格(必要时提示 SSH 认证)
@@ -255,7 +255,7 @@ herdr remote-resume --peer workbox
 herdr remote-resume --list     # 只显示 pending 窗格,不执行取回
 ```
 
-此功能只改善正常停止。崩溃、断电或网络故障无法执行 handoff,委派窗格仍按原有约定终止。`herdr update --handoff` 仍会被活动展示阻塞;更新前请先交还或关闭远程窗格。嵌套 SSH 链只交还一跳:直接拥有的窗格被交还,更深层的窗格在停止时终止。
+后续 managed SSH connection 或 client attach 到 owning remote server 时会显示 orphan review。**Retain** 保持隐藏并在下次再次提醒,**Terminate** 终止,**Promote** 将其显示到当前 review 所在 session。remote machine/server stop 会销毁 PTY;恢复后 Herdr 报告 ended,不会伪造 replacement shell。普通 `session delete` 在有 ticket 时拒绝,`--force` 报告丢弃数与可能的 orphan 数。
 
 ## 直接终端附加
 

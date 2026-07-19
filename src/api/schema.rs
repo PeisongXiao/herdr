@@ -143,6 +143,28 @@ pub enum Method {
     TerminalDelegateTerminate(TerminalDelegationTarget),
     #[serde(rename = "terminal.delegate.handoff")]
     TerminalDelegateHandoff(TerminalDelegateHandoffParams),
+    #[serde(rename = "terminal.delegate.park")]
+    TerminalDelegatePark(TerminalDelegateParkParams),
+    #[serde(rename = "terminal.delegate.parked.status")]
+    TerminalParkedStatus(TerminalParkedTarget),
+    #[serde(rename = "terminal.delegate.parked.resume")]
+    TerminalParkedResume(TerminalParkedResumeParams),
+    #[serde(rename = "terminal.delegate.parked.list")]
+    TerminalParkedList(TerminalParkedListParams),
+    #[serde(rename = "terminal.delegate.parked.resolve")]
+    TerminalParkedResolve(TerminalParkedResolveParams),
+    #[serde(rename = "terminal.delegate.parked.admin.list")]
+    TerminalParkedAdminList(TerminalParkedAdminListParams),
+    #[serde(rename = "terminal.delegate.parked.admin.resolve")]
+    TerminalParkedAdminResolve(TerminalParkedAdminResolveParams),
+    #[serde(rename = "terminal.recovery.list")]
+    TerminalRecoveryList(TerminalRecoveryListParams),
+    #[serde(rename = "terminal.recovery.status")]
+    TerminalRecoveryStatus(TerminalRecoveryTarget),
+    #[serde(rename = "terminal.recovery.retry")]
+    TerminalRecoveryRetry(TerminalRecoveryTarget),
+    #[serde(rename = "terminal.recovery.discard")]
+    TerminalRecoveryDiscard(TerminalRecoveryTarget),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]
@@ -251,5 +273,7 @@ pub enum Method {
     PluginPaneClose(PluginPaneCloseParams),
 }
 
+mod recovery;
 #[cfg(test)]
 mod tests;
+pub use recovery::*;

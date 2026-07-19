@@ -105,10 +105,11 @@ herdr notification show <title> [--body TEXT] [--position top-left|top-right|bot
 herdr session list [--json]
 herdr session attach <name>
 herdr session stop <name> [--json]
-herdr session delete <name> [--json]
+herdr session delete <name> [--force] [--json]
 ```
 
 デフォルトセッションを明示的に停止する必要があるときは、セッション名として `default` を使ってください。
+parked terminal の recovery ticket が残る session は通常削除できません。`--force` は ticket を破棄し、hidden orphan になり得る remote terminal 数を報告する destructive option です。
 
 ## ワークスペース
 
@@ -277,6 +278,9 @@ herdr terminal attach <terminal_id> [--takeover]
 herdr terminal shell [--label LABEL]
 herdr terminal session control <target> [--takeover] [--cols N] [--rows N]
 herdr terminal session observe <target> [--cols N] [--rows N]
+herdr terminal parked list [--json]
+herdr terminal parked promote <park_id>
+herdr terminal parked terminate <park_id>
 herdr terminal title set <title>
 herdr terminal title clear
 ```
@@ -284,6 +288,7 @@ herdr terminal title clear
 ダイレクトアタッチからは `ctrl+b q` でデタッチします。リテラルの `ctrl+b` は `ctrl+b ctrl+b` で送ります。
 `terminal shell` は caller の cwd/env から server-owned shell tab を作り、Herdr 内部 routing variable を除いて attach します。managed pane SSH は代わりに exclusive terminal delegation を準備し、`terminal attach` で commit します。
 `terminal title clear` は Herdr のデフォルトの外側ターミナルウィンドウタイトルを復元します。
+`terminal parked` は workspace から隠された live PTY の local admin view です。`promote` は current session に表示し、`terminate` は完全に終了します。
 
 ## Peers
 

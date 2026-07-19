@@ -238,6 +238,12 @@ impl App {
             .and_then(|ws| ws.tabs.get(tab_idx))
             .map(|tab| tab.layout.pane_ids())
             .unwrap_or_default();
+        #[cfg(unix)]
+        for pane_id in &pane_ids {
+            if let Err(message) = self.discard_remote_restore_for_pane(*pane_id) {
+                return encode_error(id, "terminal_recovery_discard_failed", message);
+            }
+        }
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return tab_not_found(id, &target.tab_id);
         };

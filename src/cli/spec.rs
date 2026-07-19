@@ -611,6 +611,25 @@ fn terminal_command() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("parked")
+                .about("Review hidden parked terminals owned by this server")
+                .subcommand(
+                    Command::new("list")
+                        .about("List parked terminals")
+                        .arg(json_flag()),
+                )
+                .subcommand(
+                    Command::new("promote")
+                        .about("Promote a parked terminal into this session")
+                        .arg(required("park_id", "PARK_ID")),
+                )
+                .subcommand(
+                    Command::new("terminate")
+                        .about("Terminate a parked terminal")
+                        .arg(required("park_id", "PARK_ID")),
+                ),
+        )
+        .subcommand(
             Command::new("title")
                 .about("Manage the outer terminal title")
                 .subcommand(
@@ -641,6 +660,7 @@ fn session_command() -> Command {
             Command::new("delete")
                 .about("Delete a stopped session")
                 .arg(required("name", "NAME"))
+                .arg(flag("force"))
                 .arg(json_flag()),
         )
 }
