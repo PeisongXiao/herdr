@@ -100,6 +100,14 @@ impl App {
         }
     }
 
+    pub(super) fn save_auto_remote_handoff(&mut self, enabled: bool) {
+        if self.update_config_file("automatic remote handoff", |content| {
+            crate::config::upsert_section_bool(content, "remote", "auto_remote_handoff", enabled)
+        }) {
+            self.apply_config_from_disk(false);
+        }
+    }
+
     pub(super) fn save_switch_ascii_input_source_in_prefix(&mut self, enabled: bool) {
         if self.update_config_file("prefix ascii input source", |content| {
             crate::config::upsert_section_bool(

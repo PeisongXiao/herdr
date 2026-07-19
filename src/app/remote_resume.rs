@@ -81,6 +81,82 @@ pub(crate) struct PendingRemoteResumeRequest {
     outcomes: Vec<RemoteResumeOutcome>,
 }
 
+struct PreparedRemoteHandoff {
+    terminal_id: crate::terminal::TerminalId,
+    peer_id: String,
+    peer: crate::api::schema::PeerInfo,
+    delegation: crate::api::schema::TerminalDelegationInfo,
+    record: ResumeRecord,
+    park_id: String,
+    origin_id: String,
+    resume_token: String,
+    discovery_token: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteHandoffDisposition {
+    Confirmed,
+    Ambiguous,
+    DefinitiveFailure,
+}
+
+impl RemoteHandoffDisposition {
+    fn counts_as_handed_off(self) -> bool {
+        !matches!(self, Self::DefinitiveFailure)
+    }
+
+    fn reserves_pane(self) -> bool {
+        !matches!(self, Self::DefinitiveFailure)
+    }
+}
+
+fn remote_handoff_disposition(
+    result: &Result<(), crate::remote_agent::RemoteParkedError>,
+) -> RemoteHandoffDisposition {
+    match result {
+        Ok(()) => RemoteHandoffDisposition::Confirmed,
+        Err(crate::remote_agent::RemoteParkedError::Transport(_))
+        | Err(crate::remote_agent::RemoteParkedError::InvalidResponse(_)) => {
+            RemoteHandoffDisposition::Ambiguous
+        }
+        Err(crate::remote_agent::RemoteParkedError::Gone { .. })
+        | Err(crate::remote_agent::RemoteParkedError::Unauthorized { .. })
+        | Err(crate::remote_agent::RemoteParkedError::Busy { .. })
+        | Err(crate::remote_agent::RemoteParkedError::Rejected { .. }) => {
+            RemoteHandoffDisposition::DefinitiveFailure
+        }
+    }
+}
+
+fn persist_remote_handoff_disposition(
+    store: &mut ResumeStore,
+    remote_terminal_id: &str,
+    disposition: RemoteHandoffDisposition,
+) -> std::io::Result<()> {
+    match disposition {
+        RemoteHandoffDisposition::Confirmed => store.mark_parked(remote_terminal_id).map(|_| ()),
+        RemoteHandoffDisposition::Ambiguous => Ok(()),
+        RemoteHandoffDisposition::DefinitiveFailure => store.remove(remote_terminal_id).map(|_| ()),
+    }
+}
+
+fn run_remote_handoff_two_phase<T, E>(
+    jobs: Vec<T>,
+    mut park: impl FnMut(&T) -> Result<(), E>,
+    mut finish: impl FnMut(T, Result<(), E>),
+) {
+    let outcomes = jobs
+        .into_iter()
+        .map(|job| {
+            let result = park(&job);
+            (job, result)
+        })
+        .collect::<Vec<_>>();
+    for (job, result) in outcomes {
+        finish(job, result);
+    }
+}
+
 impl App {
     /// Hand every owned remote presentation back to its host, persisting a
     /// resume record per pane so a later server can re-acquire it. Idempotent:
@@ -103,7 +179,7 @@ impl App {
             }
         };
         let terminal_ids: Vec<_> = self.remote_owner_presentations.keys().cloned().collect();
-        let mut handed_off = 0usize;
+        let mut prepared = Vec::with_capacity(terminal_ids.len());
         for terminal_id in terminal_ids {
             let Some(delegation) = self.remote_owner_presentations.get(&terminal_id).cloned()
             else {
@@ -187,26 +263,75 @@ impl App {
                 );
                 continue;
             }
-            match crate::remote_agent::park_delegated_terminal(
-                &peer,
-                &delegation,
-                &park_id,
-                &credentials.origin_id,
-                resume_token.expose_secret(),
-                credentials.discovery_token.expose_secret(),
-            ) {
-                Ok(_) => {
+            prepared.push(PreparedRemoteHandoff {
+                terminal_id,
+                peer_id,
+                peer,
+                delegation,
+                record,
+                park_id,
+                origin_id: credentials.origin_id,
+                resume_token: resume_token.expose_secret().to_owned(),
+                discovery_token: credentials.discovery_token.expose_secret().to_owned(),
+            });
+        }
+
+        let mut handed_off = 0usize;
+        run_remote_handoff_two_phase(
+            prepared,
+            |handoff| {
+                crate::remote_agent::park_delegated_terminal(
+                    &handoff.peer,
+                    &handoff.delegation,
+                    &handoff.park_id,
+                    &handoff.origin_id,
+                    &handoff.resume_token,
+                    &handoff.discovery_token,
+                )
+                .map(|_| ())
+            },
+            |handoff, result| {
+                let disposition = remote_handoff_disposition(&result);
+                match &result {
+                    Ok(()) => {
+                        tracing::info!(
+                            terminal = %handoff.terminal_id,
+                            peer = %handoff.peer_id,
+                            "handed off remote pane to its host before server stop"
+                        );
+                    }
+                    Err(err) if disposition == RemoteHandoffDisposition::Ambiguous => {
+                        tracing::warn!(
+                            error = %err,
+                            terminal = %handoff.terminal_id,
+                            peer = %handoff.peer_id,
+                            "remote park reply was not confirmed; preserving its pending recovery ticket"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            terminal = %handoff.terminal_id,
+                            peer = %handoff.peer_id,
+                            "remote park request was rejected; pane keeps the destructive stop contract"
+                        );
+                    }
+                }
+
+                if disposition.counts_as_handed_off() {
                     handed_off += 1;
+                }
+                if disposition.reserves_pane() {
                     tracing::info!(
-                        terminal = %terminal_id,
-                        peer = %peer_id,
-                        "handed off remote pane to its host before server stop"
+                        terminal = %handoff.terminal_id,
+                        peer = %handoff.peer_id,
+                        "finalizing remote pane handoff before server stop"
                     );
                     // Preserve this exact layout slot as a no-PTY reservation.
                     // Session restore recognizes the explicit marker and does
                     // not infer reservation ownership from shell metadata.
-                    self.release_remote_terminal_bridge(&terminal_id);
-                    if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
+                    self.release_remote_terminal_bridge(&handoff.terminal_id);
+                    if let Some(runtime) = self.terminal_runtimes.remove(&handoff.terminal_id) {
                         runtime.shutdown();
                     }
                     if let Some(pane) = self
@@ -215,48 +340,37 @@ impl App {
                         .iter_mut()
                         .flat_map(|workspace| workspace.tabs.iter_mut())
                         .flat_map(|tab| tab.panes.values_mut())
-                        .find(|pane| pane.attached_terminal_id == terminal_id)
+                        .find(|pane| pane.attached_terminal_id == handoff.terminal_id)
                     {
                         pane.remote_restore_reservation = true;
                     }
-                    if let Err(err) = store.mark_parked(&record.remote_terminal_id) {
-                        tracing::warn!(
-                            terminal = %record.remote_terminal_id,
-                            error = %err,
-                            "remote terminal is parked but its durable lifecycle is still pending"
-                        );
-                    }
                     self.state.mark_session_dirty();
                 }
-                Err(err) => {
+
+                if let Err(err) = persist_remote_handoff_disposition(
+                    &mut store,
+                    &handoff.record.remote_terminal_id,
+                    disposition,
+                ) {
+                    let message = match disposition {
+                        RemoteHandoffDisposition::Confirmed => {
+                            "remote terminal is parked but its durable lifecycle is still pending"
+                        }
+                        RemoteHandoffDisposition::Ambiguous => {
+                            "remote terminal pending recovery state could not be preserved"
+                        }
+                        RemoteHandoffDisposition::DefinitiveFailure => {
+                            "definitively rejected remote handoff left a stale recovery ticket"
+                        }
+                    };
                     tracing::warn!(
                         error = %err,
-                        terminal = %terminal_id,
-                        peer = %peer_id,
-                        "remote park reply was not confirmed; preserving its pending recovery ticket"
+                        terminal = %handoff.record.remote_terminal_id,
+                        "{message}"
                     );
-                    // The request may have committed remotely even when its
-                    // response was lost. Reserve the slot and retain the
-                    // ParkingPending record for startup reconciliation.
-                    handed_off += 1;
-                    self.release_remote_terminal_bridge(&terminal_id);
-                    if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
-                        runtime.shutdown();
-                    }
-                    if let Some(pane) = self
-                        .state
-                        .workspaces
-                        .iter_mut()
-                        .flat_map(|workspace| workspace.tabs.iter_mut())
-                        .flat_map(|tab| tab.panes.values_mut())
-                        .find(|pane| pane.attached_terminal_id == terminal_id)
-                    {
-                        pane.remote_restore_reservation = true;
-                    }
-                    self.state.mark_session_dirty();
                 }
-            }
-        }
+            },
+        );
         handed_off
     }
 
@@ -2417,6 +2531,120 @@ mod tests {
                 .expect("remove completed placement");
         }
         assert!(store.find(&record.remote_terminal_id).is_none());
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn same_peer_parks_finish_only_after_every_request() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let jobs = vec![("peer-a", "terminal-a"), ("peer-a", "terminal-b")];
+
+        run_remote_handoff_two_phase(
+            jobs,
+            |(_, terminal)| {
+                events.borrow_mut().push(format!("park:{terminal}"));
+                Ok::<_, ()>(())
+            },
+            |(_, terminal), result| {
+                result.expect("park result");
+                events.borrow_mut().push(format!("release:{terminal}"));
+            },
+        );
+
+        assert_eq!(
+            events.into_inner(),
+            vec![
+                "park:terminal-a",
+                "park:terminal-b",
+                "release:terminal-a",
+                "release:terminal-b",
+            ]
+        );
+    }
+
+    #[test]
+    fn gone_handoff_is_not_counted_persisted_or_reserved() {
+        let (mut app, pane_id) = recovery_test_app();
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("root pane")
+            .remote_restore_reservation = false;
+        let record = recovery_test_record(&app, pane_id, 0);
+        let unique = crate::remote_resume::generate_recovery_id().expect("test id");
+        let path = std::env::temp_dir().join(format!(
+            "herdr-gone-handoff-{}-{unique}.json",
+            std::process::id()
+        ));
+        let token: SecretToken =
+            serde_json::from_str("\"test-resume-token\"").expect("resume token");
+        let mut store = ResumeStore::open(path.clone()).expect("test resume store");
+        store
+            .upsert_parking(record.clone(), "park-test".into(), token)
+            .expect("parking record");
+        let result = Err(crate::remote_agent::RemoteParkedError::Gone {
+            code: "terminal_parked_not_found".into(),
+            message: "not found".into(),
+        });
+        let disposition = remote_handoff_disposition(&result);
+
+        assert!(!disposition.counts_as_handed_off());
+        assert!(!disposition.reserves_pane());
+        persist_remote_handoff_disposition(&mut store, &record.remote_terminal_id, disposition)
+            .expect("remove rejected handoff");
+        assert!(store.find(&record.remote_terminal_id).is_none());
+        assert!(
+            !app.state.workspaces[0].tabs[0]
+                .panes
+                .get(&pane_id)
+                .expect("root pane")
+                .remote_restore_reservation
+        );
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ambiguous_handoff_outcomes_retain_pending_recovery() {
+        let (app, pane_id) = recovery_test_app();
+        let record = recovery_test_record(&app, pane_id, 0);
+        let unique = crate::remote_resume::generate_recovery_id().expect("test id");
+        let path = std::env::temp_dir().join(format!(
+            "herdr-ambiguous-handoff-{}-{unique}.json",
+            std::process::id()
+        ));
+        let token: SecretToken =
+            serde_json::from_str("\"test-resume-token\"").expect("resume token");
+        let mut store = ResumeStore::open(path.clone()).expect("test resume store");
+        store
+            .upsert_parking(record.clone(), "park-test".into(), token)
+            .expect("parking record");
+        let results = [
+            Err(crate::remote_agent::RemoteParkedError::Transport(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "reply timed out"),
+            )),
+            Err(crate::remote_agent::RemoteParkedError::InvalidResponse(
+                "truncated reply".into(),
+            )),
+        ];
+
+        for result in results {
+            let disposition = remote_handoff_disposition(&result);
+            assert_eq!(disposition, RemoteHandoffDisposition::Ambiguous);
+            assert!(disposition.counts_as_handed_off());
+            assert!(disposition.reserves_pane());
+            persist_remote_handoff_disposition(&mut store, &record.remote_terminal_id, disposition)
+                .expect("retain ambiguous handoff");
+            assert_eq!(
+                store
+                    .recovery_state(&record.remote_terminal_id)
+                    .map(|state| state.lifecycle),
+                Some(ResumeLifecycle::ParkingPending)
+            );
+        }
 
         drop(store);
         let _ = std::fs::remove_file(path);

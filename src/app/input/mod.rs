@@ -352,6 +352,9 @@ impl App {
                         SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
                             self.save_switch_ascii_input_source_in_prefix(enabled)
                         }
+                        SettingsAction::SaveAutoRemoteHandoff(enabled) => {
+                            self.save_auto_remote_handoff(enabled)
+                        }
                         SettingsAction::InstallRecommendedIntegrations => {
                             self.install_recommended_integrations()
                         }

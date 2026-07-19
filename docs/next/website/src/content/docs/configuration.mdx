@@ -129,6 +129,8 @@ This setting is independent of `manage_ssh_config`: pane SSH integration always 
 
 With `auto_remote_handoff = true`, a graceful server stop hands every delegated remote pane back to its host instead of terminating it, and the next server start re-acquires the pane into the workspace and tab it came from. Automatic re-acquire is non-interactive, so it needs key- or agent-based SSH authentication; hosts that require a password or MFA stay recorded and can be resumed with `herdr remote-resume`. Ungraceful stops (crash, power loss, network failure) still terminate remote panes, and nested SSH chains deeper than one hop are not handed off. See [Persistence and remote access](/docs/persistence-remote/#automatic-handoff-on-server-stop) for the full lifecycle.
 
+You can also toggle this experimental behavior from Settings > Experiments > automatic remote handoff. The toggle updates `[remote].auto_remote_handoff`.
+
 ## Keybindings
 
 For a guided introduction to the prefix and a vetted prefix-free setup, see [Keyboard](/docs/keyboard/).

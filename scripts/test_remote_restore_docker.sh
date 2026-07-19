@@ -245,6 +245,51 @@ parked_count() {
   parked_json "$1" | parked_ids | sed '/^$/d' | wc -l
 }
 
+parked_count_matches() {
+  local node=$1
+  local expected=$2
+  local actual
+  actual=$(parked_count "$node" 2>/dev/null) || return 1
+  [[ "$actual" =~ ^[0-9]+$ ]] || return 1
+  (( actual == expected ))
+}
+
+dump_remote_restore_diagnostics() {
+  local reason=$1
+  local node
+
+  printf '\n===== remote restore diagnostics: %s =====\n' "$reason" >&2
+  printf '\n--- origin container log ---\n' >&2
+  docker logs --tail 200 "$RUN-origin" >&2 2>&1 || true
+  printf '\n--- origin Herdr logs ---\n' >&2
+  docker exec "$RUN-origin" sh -c '
+    find /state/config /state/state -type f \( -name "*.log" -o -name "*.log.*" \) -print 2>/dev/null |
+    while IFS= read -r file; do
+      printf "\n----- %s -----\n" "$file"
+      tail -n 200 "$file"
+    done
+  ' >&2 2>&1 || true
+
+  for node in remote-live remote-park remote-down; do
+    printf '\n--- %s authoritative parked state ---\n' "$node" >&2
+    parked_json "$node" >&2 2>&1 || true
+    printf '\n--- %s container/sshd log ---\n' "$node" >&2
+    docker logs --tail 200 "$RUN-$node" >&2 2>&1 || true
+    printf '\n--- origin SSH probe to %s ---\n' "$node" >&2
+    docker exec -e HOME=/state/home "$RUN-origin" \
+      ssh -vv -o BatchMode=yes -o ConnectTimeout=5 "$node" true >&2 2>&1 || true
+  done
+
+  printf '\n--- gateway sshd log ---\n' >&2
+  docker logs --tail 200 "$RUN-gateway" >&2 2>&1 || true
+  printf '\n===== end remote restore diagnostics =====\n' >&2
+}
+
+fail_with_remote_diagnostics() {
+  dump_remote_restore_diagnostics "$*"
+  fail "$@"
+}
+
 start_agent() {
   local host=$1
   local label=$2
@@ -255,9 +300,10 @@ start_agent() {
 
 docker exec "$RUN-origin" getent hosts remote-live >/dev/null 2>&1 && \
   fail "origin unexpectedly resolves a remote node directly"
-docker exec -e HOME=/state/home "$RUN-origin" ssh remote-live true
+docker exec -e HOME=/state/home "$RUN-origin" ssh remote-live true || \
+  fail_with_remote_diagnostics "origin could not reach remote-live through the gateway"
 
-origin server ensure
+origin server ensure || fail_with_remote_diagnostics "origin server did not start"
 start_agent remote-live restore-live
 start_agent remote-park restore-park-a
 start_agent remote-park restore-park-b
@@ -270,16 +316,17 @@ for heartbeat in \
   "$TMP/nodes/remote-park/heartbeat-restore-park-b" \
   "$TMP/nodes/remote-down/heartbeat-restore-down-a" \
   "$TMP/nodes/remote-down/heartbeat-restore-down-b"; do
-  wait_until 30 test -s "$heartbeat" || fail "missing heartbeat $heartbeat"
+  wait_until 30 test -s "$heartbeat" || \
+    fail_with_remote_diagnostics "missing heartbeat $heartbeat"
 done
 
 origin server stop
-wait_until 30 test "$(parked_count remote-live)" -eq 1 || \
-  fail "live remote did not park exactly one terminal"
-wait_until 30 test "$(parked_count remote-park)" -eq 2 || \
-  fail "partition remote did not park exactly two terminals"
-wait_until 30 test "$(parked_count remote-down)" -eq 2 || \
-  fail "down remote did not park exactly two terminals"
+wait_until 30 parked_count_matches remote-live 1 || \
+  fail_with_remote_diagnostics "live remote did not park exactly one terminal"
+wait_until 30 parked_count_matches remote-park 2 || \
+  fail_with_remote_diagnostics "partition remote did not park exactly two terminals"
+wait_until 30 parked_count_matches remote-down 2 || \
+  fail_with_remote_diagnostics "down remote did not park exactly two terminals"
 
 before=$(stat -c %Y "$TMP/nodes/remote-park/heartbeat-restore-park-a")
 sleep 2
@@ -330,7 +377,8 @@ remote remote-park terminal parked terminate "${remaining_ids[1]}"
 
 docker rm "$RUN-remote-down" >/dev/null
 start_remote remote-down
-wait_until 30 remote remote-down server ensure || fail "restarted remote server did not start"
+wait_until 30 remote remote-down server ensure || \
+  fail_with_remote_diagnostics "restarted remote server did not start"
 [[ $(parked_count remote-down) -eq 0 ]] || \
   fail "remote machine restart fabricated parked terminals whose PTYs were lost"
 

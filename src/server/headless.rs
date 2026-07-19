@@ -4979,6 +4979,56 @@ next_tab = ""
     }
 
     #[test]
+    fn connected_client_can_enable_server_owned_auto_remote_handoff() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-headless-auto-remote-handoff-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(
+            &path,
+            "onboarding = false\n[remote]\nauto_remote_handoff = false\n",
+        )
+        .unwrap();
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut server = test_headless_server();
+        let (writer, _control, _render) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 1,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            writer,
+        }));
+        server.app.state.mode = crate::app::Mode::Settings;
+        server.app.state.settings.section = crate::app::state::SettingsSection::Experiments;
+        server.app.state.settings.list.selected = 2;
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\r".to_vec(),
+        }));
+
+        assert!(server.app.auto_remote_handoff);
+        assert!(server.app.state.auto_remote_handoff);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[remote]"));
+        assert!(content.contains("auto_remote_handoff = true"));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn invalid_server_keybindings_apply_valid_subset_after_settings_save_without_caching_local_keybindings(
     ) {
         let path = std::env::temp_dir().join(format!(

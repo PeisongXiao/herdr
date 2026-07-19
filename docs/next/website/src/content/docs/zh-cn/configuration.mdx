@@ -129,6 +129,8 @@ auto_remote_handoff = false
 
 设置 `auto_remote_handoff = true` 后,服务器正常停止时会把委派中的远程窗格交还给所在主机而不是终止它,并在下次服务器启动时把它重新取回原来的工作区与标签页。自动取回是非交互式的,因此需要基于密钥或 agent 的 SSH 认证;需要密码或 MFA 的主机会保留在记录中,可用 `herdr remote-resume` 手动取回。非正常停止(崩溃、断电、网络故障)仍会终止远程窗格,且超过一跳的嵌套 SSH 链不会被交还。完整生命周期见[持久化与远程访问](/zh-cn/docs/persistence-remote/#automatic-handoff-on-server-stop)。
 
+也可以在 Settings > Experiments > automatic remote handoff 中切换这一实验性行为。该开关会更新 `[remote].auto_remote_handoff`。
+
 ## 按键绑定
 
 前缀键的入门介绍和经过验证的免前缀配置,见[键盘](/zh-cn/docs/keyboard/)。

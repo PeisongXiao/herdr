@@ -678,6 +678,7 @@ impl App {
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
             pane_history_persistence: config.experimental.pane_history,
+            auto_remote_handoff: config.remote.auto_remote_handoff,
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
             cjk_ime_agents: parse_cjk_ime_agents(&config.experimental.cjk_ime_agents),
@@ -1563,6 +1564,7 @@ impl App {
 
         if !invalid_section("remote") {
             self.auto_remote_handoff = config.remote.auto_remote_handoff;
+            self.state.auto_remote_handoff = config.remote.auto_remote_handoff;
         }
 
         if !invalid_section("update") {
@@ -3157,6 +3159,47 @@ mod tests {
         assert!(content.contains("[experimental]"));
         assert!(content.contains("pane_history = true"));
         assert!(app.state.config_diagnostic.is_none());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn settings_save_auto_remote_handoff_preserves_remote_config_and_applies_live() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("settings-save-auto-remote-handoff");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "onboarding = false\n[remote]\nmanage_ssh_config = false\nssh_integration = false\nauto_remote_handoff = false\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert!(!app.auto_remote_handoff);
+        assert!(!app.state.auto_remote_handoff);
+
+        app.save_auto_remote_handoff(true);
+
+        assert!(app.auto_remote_handoff);
+        assert!(app.state.auto_remote_handoff);
+        let content = std::fs::read_to_string(&path).unwrap();
+        let saved: toml::Value = toml::from_str(&content).unwrap();
+        assert_eq!(saved["remote"]["manage_ssh_config"].as_bool(), Some(false));
+        assert_eq!(saved["remote"]["ssh_integration"].as_bool(), Some(false));
+        assert_eq!(saved["remote"]["auto_remote_handoff"].as_bool(), Some(true));
+        assert!(app.state.config_diagnostic.is_none());
+
+        std::fs::write(&path, "[remote]\nauto_remote_handoff = \"invalid\"\n").unwrap();
+        app.apply_config_from_disk(false);
+        assert!(app.auto_remote_handoff);
+        assert!(app.state.auto_remote_handoff);
+
+        std::fs::write(&path, "[remote]\nauto_remote_handoff = false\n").unwrap();
+        app.apply_config_from_disk(false);
+        assert!(!app.auto_remote_handoff);
+        assert!(!app.state.auto_remote_handoff);
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

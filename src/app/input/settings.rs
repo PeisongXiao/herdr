@@ -19,6 +19,7 @@ pub(super) enum SettingsAction {
     SaveAgentBorderLabels(bool),
     SavePaneHistory(bool),
     SaveSwitchAsciiInputSourceInPrefix(bool),
+    SaveAutoRemoteHandoff(bool),
     InstallRecommendedIntegrations,
 }
 
@@ -33,6 +34,9 @@ fn experiment_toggle_action(state: &AppState, idx: usize) -> Option<SettingsActi
                 !ExperimentSetting::SwitchAsciiInputSourceInPrefix.enabled(state),
             ))
         }
+        ExperimentSetting::AutoRemoteHandoff => Some(SettingsAction::SaveAutoRemoteHandoff(
+            !ExperimentSetting::AutoRemoteHandoff.enabled(state),
+        )),
     }
 }
 
@@ -52,6 +56,9 @@ impl App {
                 }
                 SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
                     self.save_switch_ascii_input_source_in_prefix(enabled)
+                }
+                SettingsAction::SaveAutoRemoteHandoff(enabled) => {
+                    self.save_auto_remote_handoff(enabled)
                 }
                 SettingsAction::InstallRecommendedIntegrations => {
                     self.install_recommended_integrations()
@@ -582,6 +589,31 @@ mod tests {
     }
 
     #[test]
+    fn settings_experiments_third_row_toggles_auto_remote_handoff() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.auto_remote_handoff = false;
+        open_settings_at(&mut state, SettingsSection::Experiments);
+
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+        );
+        assert_eq!(state.settings.list.selected, 2);
+
+        let action = update_settings_state(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(action, Some(SettingsAction::SaveAutoRemoteHandoff(true)));
+        assert_eq!(state.mode, Mode::Settings);
+    }
+
+    #[test]
     fn settings_tab_cycle_places_experiments_last() {
         let mut state = state_with_workspaces(&["test"]);
         open_settings_at(&mut state, SettingsSection::PaneLabels);
@@ -688,6 +720,23 @@ mod tests {
             Some(SettingsAction::SaveSwitchAsciiInputSourceInPrefix(true))
         );
         assert_eq!(app.state.settings.list.selected, 1);
+    }
+
+    #[test]
+    fn settings_mouse_click_toggles_auto_remote_handoff_row() {
+        let mut app = app_for_mouse_test();
+        app.state.auto_remote_handoff = false;
+        open_settings_at(&mut app.state, SettingsSection::Experiments);
+
+        let area = app.state.settings_content_rect();
+        let action = app.state.handle_settings_mouse(mouse(
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            area.x + 2,
+            area.y + 5,
+        ));
+
+        assert_eq!(action, Some(SettingsAction::SaveAutoRemoteHandoff(true)));
+        assert_eq!(app.state.settings.list.selected, 2);
     }
 
     #[test]

@@ -907,10 +907,15 @@ impl SettingsSection {
 pub(crate) enum ExperimentSetting {
     PaneHistory,
     SwitchAsciiInputSourceInPrefix,
+    AutoRemoteHandoff,
 }
 
 impl ExperimentSetting {
-    pub(crate) const ALL: [Self; 2] = [Self::PaneHistory, Self::SwitchAsciiInputSourceInPrefix];
+    pub(crate) const ALL: [Self; 3] = [
+        Self::PaneHistory,
+        Self::SwitchAsciiInputSourceInPrefix,
+        Self::AutoRemoteHandoff,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -918,6 +923,7 @@ impl ExperimentSetting {
             Self::SwitchAsciiInputSourceInPrefix => {
                 "switch to ascii input source in prefix (macOS)"
             }
+            Self::AutoRemoteHandoff => "automatic remote handoff",
         }
     }
 
@@ -927,6 +933,7 @@ impl ExperimentSetting {
             Self::SwitchAsciiInputSourceInPrefix => {
                 state.switch_ascii_input_source_in_prefix_enabled()
             }
+            Self::AutoRemoteHandoff => state.auto_remote_handoff_enabled(),
         }
     }
 }
@@ -1467,6 +1474,8 @@ pub struct AppState {
     pub show_agent_labels_on_pane_borders: bool,
     pub hide_tab_bar_when_single_tab: bool,
     pub pane_history_persistence: bool,
+    /// Presentation mirror of the server-owned `[remote] auto_remote_handoff` setting.
+    pub auto_remote_handoff: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`. See `[experimental] reveal_hidden_cursor_for_cjk_ime`.
     pub reveal_hidden_cursor_for_cjk_ime: bool,
@@ -1556,6 +1565,10 @@ impl AppState {
 
     pub fn pane_history_persistence_enabled(&self) -> bool {
         self.pane_history_persistence
+    }
+
+    pub fn auto_remote_handoff_enabled(&self) -> bool {
+        self.auto_remote_handoff
     }
 
     pub fn switch_ascii_input_source_in_prefix_enabled(&self) -> bool {
@@ -1830,6 +1843,7 @@ impl AppState {
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             pane_history_persistence: false,
+            auto_remote_handoff: false,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,
             cjk_ime_agents: Vec::new(),

@@ -528,4 +528,29 @@ mod tests {
 
         assert!(rendered.contains("switch to ascii input source in prefix (macOS) [✓]"));
     }
+
+    #[test]
+    fn experiments_renders_automatic_remote_handoff_row() {
+        let mut app = AppState::test_new();
+        app.auto_remote_handoff = true;
+        app.settings.section = SettingsSection::Experiments;
+        app.settings.list.selected = 2;
+        app.mode = Mode::Settings;
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(80, 24)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_settings_overlay(&app, frame, Rect::new(0, 0, 80, 24)))
+            .expect("settings overlay should render");
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("automatic remote handoff [✓]"));
+    }
 }
