@@ -93,10 +93,7 @@ fn print_full_status(json: bool) -> std::io::Result<i32> {
 
     println!("client:");
     println!("  version: {}", crate::build_info::version());
-    println!(
-        "  channel: {}",
-        crate::config::Config::load().config.update.channel.as_str()
-    );
+    println!("  distribution_id: {}", crate::build_info::DISTRIBUTION_ID);
     println!("  protocol: {}", crate::protocol::PROTOCOL_VERSION);
     println!();
     println!("server:");
@@ -125,10 +122,7 @@ fn print_client_status(json: bool) -> std::io::Result<()> {
     }
 
     println!("version: {}", crate::build_info::version());
-    println!(
-        "channel: {}",
-        crate::config::Config::load().config.update.channel.as_str()
-    );
+    println!("distribution_id: {}", crate::build_info::DISTRIBUTION_ID);
     println!("protocol: {}", crate::protocol::PROTOCOL_VERSION);
     println!("binary: {}", current_exe_label());
     Ok(())
@@ -219,7 +213,7 @@ struct FullStatusJson {
 #[derive(Serialize)]
 struct ClientStatusJson {
     version: String,
-    channel: &'static str,
+    distribution_id: &'static str,
     protocol: u32,
     binary: String,
     session: Option<String>,
@@ -252,7 +246,7 @@ struct UpdateStatusJson {
 fn client_status_json() -> ClientStatusJson {
     ClientStatusJson {
         version: crate::build_info::version(),
-        channel: crate::config::Config::load().config.update.channel.as_str(),
+        distribution_id: crate::build_info::DISTRIBUTION_ID,
         protocol: crate::protocol::PROTOCOL_VERSION,
         binary: current_exe_label(),
         session: crate::session::active_name(),

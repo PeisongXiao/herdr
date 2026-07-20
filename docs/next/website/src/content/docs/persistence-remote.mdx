@@ -63,7 +63,7 @@ Then attach with:
 herdr --remote workbox
 ```
 
-Remote attach supports Linux and macOS hosts on x86_64 and aarch64. Herdr checks the remote platform, prefers a matching `herdr` already on the remote `PATH`, then checks common direct, Homebrew, mise, and Nix profile install paths. If no matching binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install.
+Remote attach supports Linux and macOS hosts on x86_64 and aarch64. The remote host must already have a compatible `peisongxiao/herdr` build installed. Herdr checks the remote `PATH` and the source installer's default `~/.local/bin/herdr`; it does not copy, download, install, or replace the remote binary. Missing or incompatible builds fail with guidance to update the remote source checkout and rerun `./install-local.sh` there.
 
 Native Windows `herdr --remote` is not part of the Windows beta. From Windows, SSH into the server and run `herdr` there.
 
@@ -86,13 +86,7 @@ herdr --remote workbox --handoff
 
 If you SSH into the server first and run `herdr` there, Herdr runs entirely on the server. That mode is useful and simple, but it cannot access your local desktop clipboard beyond normal terminal text paste.
 
-When your local and remote platforms match, Herdr can copy the current local binary for direct installs. For Homebrew, mise, and Nix installs, or when the platforms differ, it downloads the matching release asset for the current client version from `https://herdr.dev/latest.json`.
-
-For local builds or custom binaries, set `HERDR_REMOTE_BINARY` to a local file path before running remote attach.
-
-```bash
-HERDR_REMOTE_BINARY=target/release/herdr herdr --remote workbox
-```
+Remote attach never provisions the host. Install this fork from source on both machines before attaching.
 
 ## Remote named sessions
 
@@ -138,13 +132,12 @@ herdr agent start reviewer --ssh workbox --ssh-session agents --agent opencode -
 
 Session selection is explicit for direct SSH federation. Both `herdr agent start --ssh workbox` and pane `ssh workbox` pass remote Herdr session `default` explicitly, so inherited or SSH-accepted `HERDR_SESSION`, `HERDR_SOCKET_PATH`, and `HERDR_CLIENT_SOCKET_PATH` values cannot redirect setup, API calls, or the final attach. A named remote agent session still requires `--ssh-session NAME`; plain pane SSH does not select named sessions from local state, environment, or SSH config.
 
-Unlike `herdr --remote`, direct federation does not copy, download, install, or replace Herdr on the remote host. It searches in this order:
+Direct federation has the same preinstallation requirement as `herdr --remote`. It never provisions the host and searches in this order:
 
 1. `herdr` on the remote `PATH`
 2. `~/.local/bin/herdr`
-3. common system, Homebrew, Linuxbrew, mise, and Nix profile locations
 
-The default destination of `install-local.sh` therefore works even when `~/.local/bin` has not been added to the non-interactive SSH `PATH`. If no binary is found, Herdr prints an explicit install warning. If the running remote server has a different protocol or does not advertise both peer federation and remote presentation, Herdr prints an explicit compatibility warning asking you to update both machines. An explicit `agent start --ssh` or API request fails rather than silently turning into an unmanaged SSH shell. The pane shim reports the missing requirement or setup error, closes its private managed connection, and then runs the original raw SSH argv unchanged as ordinary SSH.
+The default destination of `install-local.sh` therefore works even when `~/.local/bin` has not been added to the non-interactive SSH `PATH`. If no binary is found, Herdr prints an explicit source-install warning. If the running remote server has a different protocol or does not advertise both peer federation and remote presentation, Herdr asks you to update both `peisongxiao/herdr` checkouts and rerun the installer. An explicit `agent start --ssh` or API request fails rather than silently turning into an unmanaged SSH shell. The pane shim reports the missing requirement or setup error, closes its private managed connection, and then runs the original raw SSH argv unchanged as ordinary SSH.
 
 Full bidirectional awareness also requires SSH to permit remote forwarding of a Unix-domain socket for the account being used. If forwarding is restricted, check both the SSH daemon's forwarding policy, including account-specific rules, and any options attached to the key in `authorized_keys`; ask the server administrator to permit the Herdr remote Unix-socket forward without relaxing unrelated SSH access. When that forward is denied, Herdr retains the actionable `remote peer bridge failed` diagnostic explaining that federation requires remote Unix-socket forwarding and identifying server or authorized-key restrictions. Explicit agent and API starts stop rather than silently continuing with one-way awareness. The pane shim prints the same diagnostic before falling through to the original raw SSH argv.
 
@@ -197,7 +190,7 @@ herdr remote-handoff
 
 `remote-handoff` is cursor-only: it takes no host, pane id, or target and works only in the currently delegated pane containing the command. The remote daemon removes the delegation and puts that same live pane into a new workspace on its own host. It does not merge the pane into an existing workspace or change an already attached remote TUI's focus; it becomes active only when that server had no active workspace. The managed attach then ends and the old owner pane closes. If that pane owns a deeper remote presentation, including one whose connection is still being prepared, Herdr refuses the intermediate handoff; finish or cancel setup and hand off the innermost pane first. Use `herdr --remote workbox`, or ordinary SSH followed by `herdr`, to continue in the full remote session and select the new workspace.
 
-This command is unrelated to update live handoff. `herdr remote-handoff` moves one delegated pane back into its host's workspace list; `herdr update --handoff` and `herdr --remote --handoff` replace a running server while trying to preserve all of its panes.
+This command is different from remote-attach server handoff. `herdr remote-handoff` moves one delegated pane back into its host's workspace list; `herdr --remote --handoff` replaces a running remote server while trying to preserve all of its panes.
 
 ### Nested SSH and takeover
 

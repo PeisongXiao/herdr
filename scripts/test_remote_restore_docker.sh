@@ -16,6 +16,11 @@ containers=(
   "$RUN-origin"
   "$RUN-origin-other"
   "$RUN-gateway"
+  "$RUN-upstream-sink"
+  "$RUN-remote-match"
+  "$RUN-remote-missing"
+  "$RUN-remote-official-missing-id"
+  "$RUN-remote-official-wrong-id"
   "$RUN-remote-live"
   "$RUN-remote-park"
   "$RUN-remote-down"
@@ -71,6 +76,20 @@ docker run --rm \
   "$DEV_IMAGE" \
   sh -c 'cp /target/debug/herdr /out/herdr && chmod 755 /out/herdr'
 
+client_identity=$(docker run --rm \
+  -v "$TMP/herdr:/fixture/herdr:ro" \
+  "$DEV_IMAGE" \
+  /fixture/herdr status client --json)
+client_version=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])' \
+  <<<"$client_identity")
+client_protocol=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["protocol"])' \
+  <<<"$client_identity")
+client_distribution=$(python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["distribution_id"])' \
+  <<<"$client_identity")
+[[ "$client_distribution" == "peisongxiao/herdr" ]] || \
+  fail "test build reported unexpected distribution_id $client_distribution"
+
 mkdir -p "$TMP/ssh" "$TMP/nodes"
 docker run --rm -v "$TMP/ssh:/keys" "$DEV_IMAGE" \
   sh -c "ssh-keygen -q -t ed25519 -N '' -f /keys/id_ed25519 && chown $(id -u):$(id -g) /keys/id_ed25519 /keys/id_ed25519.pub"
@@ -88,6 +107,69 @@ chmod 700 "$XDG_RUNTIME_DIR"
 exec /opt/herdr/herdr "$@"
 EOF
 chmod 755 "$TMP/herdr-wrapper"
+
+cat >"$TMP/herdr-official-missing-id" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>/state/herdr-invocations.log
+if [ "\$#" -eq 1 ] && [ "\$1" = "--version" ]; then
+  printf 'herdr %s\n' '$client_version'
+  exit 0
+fi
+if [ "\$#" -eq 3 ] && [ "\$1" = "status" ] && [ "\$2" = "client" ] && [ "\$3" = "--json" ]; then
+  printf '%s\n' '{"version":"$client_version","protocol":$client_protocol,"binary":"/usr/local/bin/herdr"}'
+  exit 0
+fi
+printf '%s\n' "\$*" >>/state/herdr-mutations.log
+exit 90
+EOF
+chmod 755 "$TMP/herdr-official-missing-id"
+
+cat >"$TMP/herdr-official-wrong-id" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>/state/herdr-invocations.log
+if [ "\$#" -eq 1 ] && [ "\$1" = "--version" ]; then
+  printf 'herdr %s\n' '$client_version'
+  exit 0
+fi
+if [ "\$#" -eq 3 ] && [ "\$1" = "status" ] && [ "\$2" = "client" ] && [ "\$3" = "--json" ]; then
+  printf '%s\n' '{"version":"$client_version","distribution_id":"ogulcancelik/herdr","protocol":$client_protocol,"binary":"/usr/local/bin/herdr"}'
+  exit 0
+fi
+printf '%s\n' "\$*" >>/state/herdr-mutations.log
+exit 91
+EOF
+chmod 755 "$TMP/herdr-official-wrong-id"
+
+cat >"$TMP/upstream-sink.py" <<'PY'
+import pathlib
+import socket
+import threading
+
+log_path = pathlib.Path("/state/requests.log")
+
+
+def serve(port):
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("0.0.0.0", port))
+    listener.listen()
+    while True:
+        connection, address = listener.accept()
+        with connection:
+            payload = connection.recv(4096)
+            with log_path.open("ab") as log:
+                log.write(f"port={port} peer={address[0]} ".encode())
+                log.write(payload.replace(b"\n", b"\\n"))
+                log.write(b"\n")
+            connection.sendall(
+                b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+            )
+
+
+for sink_port in (443, 8080):
+    threading.Thread(target=serve, args=(sink_port,), daemon=True).start()
+threading.Event().wait()
+PY
 
 cat >"$TMP/sshd.conf" <<'EOF'
 PermitRootLogin prohibit-password
@@ -108,7 +190,10 @@ prepare_state() {
   chmod 600 "$state/home/.ssh/id_ed25519"
 }
 
-for node in origin origin-other remote-live remote-park remote-down; do
+for node in \
+  origin origin-other \
+  remote-match remote-missing remote-official-missing-id remote-official-wrong-id \
+  remote-live remote-park remote-down; do
   prepare_state "$node"
 done
 
@@ -130,7 +215,7 @@ Host gateway
   UserKnownHostsFile /dev/null
   LogLevel ERROR
 
-Host remote-live remote-park remote-down
+Host remote-match remote-missing remote-official-missing-id remote-official-wrong-id remote-live remote-park remote-down
   User root
   IdentityFile /state/home/.ssh/id_ed25519
   ProxyJump gateway
@@ -148,6 +233,16 @@ chmod 600 "$TMP/nodes/origin/home/.ssh/config" \
 docker network create --internal "$ORIGIN_NET" >/dev/null
 docker network create --internal "$REMOTE_NET" >/dev/null
 
+mkdir -p "$TMP/upstream"
+docker run -d --name "$RUN-upstream-sink" --hostname upstream-sink \
+  --network "$ORIGIN_NET" --network-alias upstream-sink \
+  -v "$TMP/upstream-sink.py:/fixture/upstream-sink.py:ro" \
+  -v "$TMP/upstream:/state" \
+  "$DEV_IMAGE" python3 /fixture/upstream-sink.py >/dev/null
+upstream_sink_ip=$(docker inspect --format \
+  "{{(index .NetworkSettings.Networks \"$ORIGIN_NET\").IPAddress}}" \
+  "$RUN-upstream-sink")
+
 docker run -d --name "$RUN-gateway" --hostname gateway \
   --network "$ORIGIN_NET" --network-alias gateway \
   -v "$TMP/ssh/authorized_keys:/fixture/authorized_keys:ro" \
@@ -158,28 +253,57 @@ docker network connect --alias gateway "$REMOTE_NET" "$RUN-gateway"
 
 start_remote() {
   local node=$1
+  local binary_kind=${2:-matching}
+  local binary_mounts=()
+  case "$binary_kind" in
+    matching)
+      binary_mounts=(
+        -v "$TMP/herdr:/opt/herdr/herdr:ro"
+        -v "$TMP/herdr-wrapper:/usr/local/bin/herdr:ro"
+      )
+      ;;
+    missing)
+      ;;
+    official-missing-id)
+      binary_mounts=(
+        -v "$TMP/herdr-official-missing-id:/usr/local/bin/herdr:ro"
+      )
+      ;;
+    official-wrong-id)
+      binary_mounts=(
+        -v "$TMP/herdr-official-wrong-id:/usr/local/bin/herdr:ro"
+      )
+      ;;
+    *)
+      fail "unknown remote binary fixture $binary_kind"
+      ;;
+  esac
   docker run -d --name "$RUN-$node" --hostname "$node" \
     --network "$REMOTE_NET" --network-alias "$node" \
-    -v "$TMP/herdr:/opt/herdr/herdr:ro" \
-    -v "$TMP/herdr-wrapper:/usr/local/bin/herdr:ro" \
+    "${binary_mounts[@]}" \
     -v "$TMP/nodes/$node:/state" \
     -v "$TMP/ssh/authorized_keys:/fixture/authorized_keys:ro" \
     -v "$TMP/sshd.conf:/etc/ssh/sshd_config.d/99-herdr.conf:ro" \
     "$SSH_IMAGE" bash -c \
-    'mkdir -p /root/.ssh && cp /fixture/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && ssh-keygen -A && exec /usr/sbin/sshd -D -e' >/dev/null
+    'rm -f /root/.local/bin/herdr && mkdir -p /root/.ssh && cp /fixture/authorized_keys /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && ssh-keygen -A && exec /usr/sbin/sshd -D -e' >/dev/null
 }
 
 start_origin() {
   local node=$1
   docker run -d --name "$RUN-$node" --hostname "$node" \
     --network "$ORIGIN_NET" --network-alias "$node" \
+    --add-host "herdr.dev:$upstream_sink_ip" \
     -v "$TMP/herdr:/opt/herdr/herdr:ro" \
     -v "$TMP/herdr-wrapper:/usr/local/bin/herdr:ro" \
     -v "$TMP/nodes/$node:/state" \
     "$DEV_IMAGE" sh -c \
-    'mkdir -p /root/.ssh && cp /state/home/.ssh/config /root/.ssh/config && chmod 600 /root/.ssh/config && exec sleep infinity' >/dev/null
+    'chown -R 0:0 /state/home/.ssh && mkdir -p /root/.ssh && cp /state/home/.ssh/config /root/.ssh/config && chmod 600 /root/.ssh/config && exec sleep infinity' >/dev/null
 }
 
+start_remote remote-match
+start_remote remote-missing missing
+start_remote remote-official-missing-id official-missing-id
+start_remote remote-official-wrong-id official-wrong-id
 start_remote remote-live
 start_remote remote-park
 start_remote remote-down
@@ -190,6 +314,14 @@ remote_ip() {
 
 cat >>"$TMP/nodes/origin/home/.ssh/config" <<EOF
 
+Host remote-match
+  HostName $(remote_ip remote-match)
+Host remote-missing
+  HostName $(remote_ip remote-missing)
+Host remote-official-missing-id
+  HostName $(remote_ip remote-official-missing-id)
+Host remote-official-wrong-id
+  HostName $(remote_ip remote-official-wrong-id)
 Host remote-live
   HostName $(remote_ip remote-live)
 Host remote-park
@@ -298,10 +430,97 @@ start_agent() {
     "while :; do date +%s > /state/heartbeat-$label; sleep 1; done" >/dev/null
 }
 
+remote_launch_probe() {
+  local node=$1
+  local output=$2
+  docker exec \
+    -e HERDR_SESSION=remote-preinstall-probe \
+    -e HTTPS_PROXY=http://upstream-sink:8080 \
+    -e HTTP_PROXY=http://upstream-sink:8080 \
+    -e https_proxy=http://upstream-sink:8080 \
+    -e http_proxy=http://upstream-sink:8080 \
+    "$RUN-origin" timeout 15 /usr/local/bin/herdr --remote "$node" \
+    </dev/null >"$output" 2>&1
+}
+
+interactive_remote_launch_probe() {
+  local node=$1
+  local output=$2
+  docker exec \
+    -e HERDR_SESSION=remote-preinstall-probe \
+    -e HTTPS_PROXY=http://upstream-sink:8080 \
+    -e HTTP_PROXY=http://upstream-sink:8080 \
+    -e https_proxy=http://upstream-sink:8080 \
+    -e http_proxy=http://upstream-sink:8080 \
+    "$RUN-origin" timeout 15 python3 -c \
+    'import os, pty, sys; raise SystemExit(os.waitstatus_to_exitcode(pty.spawn(["/usr/local/bin/herdr", "--remote", sys.argv[1]])))' \
+    "$node" </dev/null >"$output" 2>&1
+}
+
+assert_rejected_before_mutation() {
+  local node=$1
+  local state="$TMP/nodes/$node"
+  local output="$TMP/$node-launch.log"
+  local status
+
+  set +e
+  remote_launch_probe "$node" "$output"
+  status=$?
+  set -e
+  (( status != 0 && status != 124 )) || \
+    fail "$node did not fail promptly during remote identity validation"
+  grep -Fq 'distribution_id peisongxiao/herdr' "$output" || \
+    fail "$node rejection did not report the required distribution identity"
+  grep -Fq './install-local.sh' "$output" || \
+    fail "$node rejection did not provide source installation guidance"
+  [[ ! -e "$state/home/.local/bin/herdr" ]] || \
+    fail "$node received an automatic Herdr install"
+  docker exec "$RUN-$node" test ! -e /root/.local/bin/herdr || \
+    fail "$node received an automatic Herdr install in the SSH account home"
+  [[ ! -s "$state/herdr-mutations.log" ]] || \
+    fail "$node fake client received a server/session mutation command"
+  if find "$state/state" "$state/run" -mindepth 1 -print -quit | grep -q .; then
+    fail "$node created remote server or session state before identity validation"
+  fi
+}
+
+assert_identity_probes_only() {
+  local node=$1
+  local expected=$'--version\nstatus client --json'
+  local actual
+  actual=$(cat "$TMP/nodes/$node/herdr-invocations.log" 2>/dev/null || true)
+  [[ "$actual" == "$expected" ]] || \
+    fail "$node fake client received unexpected commands: $actual"
+}
+
 docker exec "$RUN-origin" getent hosts remote-live >/dev/null 2>&1 && \
   fail "origin unexpectedly resolves a remote node directly"
 docker exec -e HOME=/state/home "$RUN-origin" ssh remote-live true || \
   fail_with_remote_diagnostics "origin could not reach remote-live through the gateway"
+
+set +e
+interactive_remote_launch_probe remote-match "$TMP/remote-match-launch.log"
+match_status=$?
+set -e
+if grep -Fq 'expected distribution_id' "$TMP/remote-match-launch.log"; then
+  cat "$TMP/remote-match-launch.log" >&2
+  fail "matching preinstalled fork was rejected"
+fi
+wait_until 15 sh -c \
+  "docker exec -e HERDR_SESSION=remote-preinstall-probe '$RUN-remote-match' /usr/local/bin/herdr status server --json 2>/dev/null | grep -q '\"running\":[[:space:]]*true'" || {
+    cat "$TMP/remote-match-launch.log" >&2
+    fail "matching preinstalled fork did not start its remote server (probe status $match_status)"
+  }
+docker exec -e HERDR_SESSION=remote-preinstall-probe "$RUN-remote-match" \
+  /usr/local/bin/herdr server stop >/dev/null
+
+assert_rejected_before_mutation remote-missing
+assert_rejected_before_mutation remote-official-missing-id
+assert_rejected_before_mutation remote-official-wrong-id
+assert_identity_probes_only remote-official-missing-id
+assert_identity_probes_only remote-official-wrong-id
+[[ ! -s "$TMP/upstream/requests.log" ]] || \
+  fail "remote preparation attempted an upstream request: $(cat "$TMP/upstream/requests.log")"
 
 origin server ensure || fail_with_remote_diagnostics "origin server did not start"
 start_agent remote-live restore-live

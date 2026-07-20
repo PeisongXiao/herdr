@@ -1,7 +1,6 @@
 //! Remote thin-client launcher over SSH command stdio.
 
-use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, IsTerminal, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -20,9 +19,6 @@ const BRIDGE_SOCKET_PERMISSION_MODE: u32 = 0o600;
 const REMOTE_SERVER_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CURRENT_PROTOCOL: u32 = crate::protocol::PROTOCOL_VERSION;
-const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
-const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
-const REMOTE_BINARY_ENV_VAR: &str = "HERDR_REMOTE_BINARY";
 const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
 pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "HERDR_REATTACH_COMMAND";
 
@@ -171,18 +167,12 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         .remote
         .manage_ssh_config;
     let remote_ssh = RemoteSsh::new(remote.target.clone(), manage_ssh_config);
-    let prepared_remote = prepare_remote_herdr(&remote_ssh, remote.live_handoff)?;
-    ensure_remote_server_ready(
-        &remote_ssh,
-        &prepared_remote.remote_herdr,
-        prepared_remote.installed_or_replaced,
-        prepared_remote.stop_after_install_approved,
-        remote.live_handoff,
-    )?;
+    let remote_herdr = prepare_remote_herdr(&remote_ssh)?;
+    ensure_remote_server_ready(&remote_ssh, &remote_herdr, remote.live_handoff)?;
 
     let _bridge = SshStdioBridge::start(
         remote.target,
-        prepared_remote.remote_herdr,
+        remote_herdr,
         local_socket.clone(),
         session_name,
         remote_ssh.options(),
@@ -258,46 +248,18 @@ impl RemotePlatform {
         };
         Some(Self { os, arch })
     }
-
-    fn local() -> Self {
-        let os = if cfg!(target_os = "linux") {
-            "linux"
-        } else if cfg!(target_os = "macos") {
-            "macos"
-        } else {
-            "unknown"
-        };
-
-        let arch = if cfg!(target_arch = "x86_64") {
-            "x86_64"
-        } else if cfg!(target_arch = "aarch64") {
-            "aarch64"
-        } else {
-            "unknown"
-        };
-
-        Self { os, arch }
-    }
-
-    fn asset_key(&self) -> String {
-        format!("{}-{}", self.os, self.arch)
-    }
 }
 
 #[derive(Debug, Clone)]
 struct RemoteHerdr {
-    install_suffix: String,
     shell_path: String,
     platform: RemotePlatform,
 }
 
 impl RemoteHerdr {
     fn for_platform(platform: RemotePlatform) -> Self {
-        let install_suffix = ".local/bin/herdr".to_string();
-        let shell_path = format!("\"$HOME/{install_suffix}\"");
         Self {
-            install_suffix,
-            shell_path,
+            shell_path: "\"$HOME/.local/bin/herdr\"".to_string(),
             platform,
         }
     }
@@ -308,128 +270,8 @@ impl RemoteHerdr {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum RemoteAssetRef {
-    Url(String),
-    Object { url: String, sha256: Option<String> },
-}
-
-impl RemoteAssetRef {
-    fn url(&self) -> &str {
-        match self {
-            Self::Url(url) => url,
-            Self::Object { url, .. } => url,
-        }
-    }
-
-    fn sha256(&self) -> Option<&str> {
-        match self {
-            Self::Url(_) => None,
-            Self::Object { sha256, .. } => {
-                sha256.as_deref().filter(|value| !value.trim().is_empty())
-            }
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct RemoteUpdateManifest {
-    version: String,
-    protocol: Option<u32>,
-    assets: BTreeMap<String, RemoteAssetRef>,
-    #[serde(default, deserialize_with = "deserialize_remote_manifest_releases")]
-    releases: BTreeMap<String, RemoteReleaseMetadata>,
-}
-
-#[derive(Deserialize)]
-struct RemoteReleaseMetadata {
-    protocol: Option<u32>,
-    #[serde(default)]
-    assets: BTreeMap<String, RemoteAssetRef>,
-}
-
-#[derive(Deserialize)]
-struct RemotePreviewManifest {
-    build_id: String,
-    protocol: u32,
-    assets: BTreeMap<String, RemoteAssetRef>,
-    #[serde(default)]
-    builds: BTreeMap<String, RemotePreviewBuildMetadata>,
-}
-
-#[derive(Deserialize)]
-struct RemotePreviewBuildMetadata {
-    protocol: u32,
-    assets: BTreeMap<String, RemoteAssetRef>,
-}
-
-fn deserialize_remote_manifest_releases<'de, D>(
-    deserializer: D,
-) -> Result<BTreeMap<String, RemoteReleaseMetadata>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(match value {
-        Some(serde_json::Value::Object(object)) => object
-            .into_iter()
-            .filter_map(|(version, release)| {
-                serde_json::from_value::<RemoteReleaseMetadata>(release)
-                    .ok()
-                    .map(|metadata| (version, metadata))
-            })
-            .collect(),
-        _ => BTreeMap::new(),
-    })
-}
-
-impl RemoteUpdateManifest {
-    fn release_for_version(&self, version: &str) -> Option<RemoteManifestReleaseRef<'_>> {
-        if self.version.trim_start_matches('v') == version {
-            return Some(RemoteManifestReleaseRef {
-                protocol: self.protocol,
-                assets: &self.assets,
-            });
-        }
-
-        self.releases.get(version).and_then(|release| {
-            (!release.assets.is_empty()).then_some(RemoteManifestReleaseRef {
-                protocol: release.protocol,
-                assets: &release.assets,
-            })
-        })
-    }
-}
-
-#[derive(Clone, Copy)]
-struct RemoteManifestReleaseRef<'a> {
-    protocol: Option<u32>,
-    assets: &'a BTreeMap<String, RemoteAssetRef>,
-}
-
 fn current_version() -> String {
     crate::build_info::version()
-}
-
-fn current_channel() -> &'static str {
-    crate::build_info::channel()
-}
-
-struct InstallSource {
-    path: PathBuf,
-    temporary_dir: Option<PathBuf>,
-}
-
-struct RemoteReleaseAsset {
-    url: String,
-    sha256: Option<String>,
-}
-
-struct PreparedRemoteHerdr {
-    remote_herdr: RemoteHerdr,
-    installed_or_replaced: bool,
-    stop_after_install_approved: bool,
 }
 
 #[derive(Clone)]
@@ -518,97 +360,6 @@ impl RemoteSsh {
     fn user_shell_output(&self, command: &str) -> io::Result<Output> {
         self.command().arg(command).output()
     }
-
-    fn install_herdr(&self, remote_herdr: &RemoteHerdr, source_path: &Path) -> io::Result<()> {
-        let output = self.sh_output(&remote_install_prepare_script(remote_herdr))?;
-        if !output.status.success() {
-            return Err(command_failed("remote install preparation failed", &output));
-        }
-        let (tmp_path, dest_path) = parse_remote_install_paths(&output.stdout)?;
-
-        let mut child = self
-            .command()
-            .arg(remote_install_stream_command(&tmp_path))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|err| {
-                io::Error::new(err.kind(), format!("failed to start ssh install: {err}"))
-            })?;
-
-        let mut source = File::open(source_path)?;
-        let copy_result = if let Some(mut stdin) = child.stdin.take() {
-            io::copy(&mut source, &mut stdin).map(|_| ())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "ssh install stdin missing",
-            ))
-        };
-        let status = child.wait()?;
-        copy_result?;
-
-        if status.success() {
-            let output = self.sh_output(&remote_install_commit_script(&tmp_path, &dest_path))?;
-            if output.status.success() {
-                Ok(())
-            } else {
-                Err(command_failed("remote install commit failed", &output))
-            }
-        } else {
-            Err(io::Error::other(format!(
-                "remote install exited with {status}"
-            )))
-        }
-    }
-}
-
-fn remote_install_prepare_script(remote_herdr: &RemoteHerdr) -> String {
-    format!(
-        r#"set -eu
-dest="$HOME/{install_suffix}"
-dir="${{dest%/*}}"
-mkdir -p "$dir"
-tmp="${{dest}}.tmp.$$"
-printf '%s\0%s\0' "$tmp" "$dest"
-"#,
-        install_suffix = remote_herdr.install_suffix
-    )
-}
-
-fn parse_remote_install_paths(stdout: &[u8]) -> io::Result<(String, String)> {
-    let mut parts = stdout.split(|byte| *byte == 0);
-    let tmp_path = parts.next().unwrap_or_default();
-    let dest_path = parts.next().unwrap_or_default();
-    if tmp_path.is_empty() || dest_path.is_empty() {
-        return Err(io::Error::other(
-            "remote install preparation did not return destination paths",
-        ));
-    }
-    let tmp_path = String::from_utf8(tmp_path.to_vec()).map_err(|err| {
-        io::Error::other(format!(
-            "remote install temporary path is not valid UTF-8: {err}"
-        ))
-    })?;
-    let dest_path = String::from_utf8(dest_path.to_vec()).map_err(|err| {
-        io::Error::other(format!(
-            "remote install destination path is not valid UTF-8: {err}"
-        ))
-    })?;
-    Ok((tmp_path, dest_path))
-}
-
-fn remote_install_stream_command(tmp_path: &str) -> String {
-    format!("tee {}", shell_quote(tmp_path))
-}
-
-fn remote_install_commit_script(tmp_path: &str, dest_path: &str) -> String {
-    format!(
-        "set -eu\nchmod 755 {tmp_path}\nmv {tmp_path} {dest_path}\n",
-        tmp_path = shell_quote(tmp_path),
-        dest_path = shell_quote(dest_path)
-    )
 }
 
 impl Drop for RemoteSsh {
@@ -647,92 +398,52 @@ fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshO
         .arg("ControlPersist=yes");
 }
 
-impl InstallSource {
-    fn persistent(path: PathBuf) -> Self {
-        Self {
-            path,
-            temporary_dir: None,
+fn prepare_remote_herdr(ssh: &RemoteSsh) -> io::Result<RemoteHerdr> {
+    let platform = detect_remote_platform(ssh)?;
+    let remote_herdr = RemoteHerdr::for_platform(platform.clone());
+    let candidates = remote_binary_candidates(ssh, &remote_herdr)?;
+
+    for candidate in &candidates {
+        if remote_binary_matches(ssh, candidate)? {
+            return Ok(candidate.clone());
         }
     }
 
-    fn temporary(path: PathBuf, temporary_dir: PathBuf) -> Self {
-        Self {
-            path,
-            temporary_dir: Some(temporary_dir),
-        }
-    }
-
-    fn cleanup(&self) {
-        if let Some(dir) = &self.temporary_dir {
-            let _ = fs::remove_dir_all(dir);
-        }
-    }
+    Err(remote_preinstall_error(
+        ssh.target(),
+        &platform,
+        candidates.len(),
+    ))
 }
 
-fn prepare_remote_herdr(
-    ssh: &RemoteSsh,
-    live_handoff_enabled: bool,
-) -> io::Result<PreparedRemoteHerdr> {
-    let platform = detect_remote_platform(ssh)?;
-    let remote_herdr = RemoteHerdr::for_platform(platform);
-    let override_binary = remote_binary_override_path()?;
-    let remote_binary_candidates = remote_binary_candidates(ssh, &remote_herdr)?;
+fn remote_preinstall_error(
+    target: &str,
+    platform: &RemotePlatform,
+    candidate_count: usize,
+) -> io::Error {
+    let candidate_summary = match candidate_count {
+        0 => "no Herdr binary candidates were found".to_string(),
+        1 => "one Herdr binary candidate was found, but it is incompatible".to_string(),
+        count => format!("{count} Herdr binary candidates were found, but all are incompatible"),
+    };
+    let kind = if candidate_count == 0 {
+        io::ErrorKind::NotFound
+    } else {
+        io::ErrorKind::InvalidData
+    };
 
-    if override_binary.is_none() {
-        for candidate in &remote_binary_candidates {
-            if remote_binary_matches(ssh, candidate).unwrap_or(false) {
-                return Ok(PreparedRemoteHerdr {
-                    remote_herdr: candidate.clone(),
-                    installed_or_replaced: false,
-                    stop_after_install_approved: false,
-                });
-            }
-        }
-        if remote_binary_matches(ssh, &remote_herdr)? {
-            return Ok(PreparedRemoteHerdr {
-                remote_herdr,
-                installed_or_replaced: false,
-                stop_after_install_approved: false,
-            });
-        }
-    }
-
-    let mut stop_after_install_approved = false;
-    if let Some(status_probe_herdr) = remote_binary_candidates.first().or_else(|| {
-        remote_binary_exists(ssh, &remote_herdr)
-            .ok()
-            .and_then(|exists| exists.then_some(&remote_herdr))
-    }) {
-        stop_after_install_approved = confirm_remote_install_with_running_server(
-            ssh,
-            status_probe_herdr,
-            live_handoff_enabled,
-        )?;
-    }
-    confirm_remote_install(
-        ssh.target(),
-        &remote_herdr,
-        &install_source_description(&remote_herdr.platform, override_binary.as_deref()),
-    )?;
-    let source = resolve_install_source(&remote_herdr.platform, override_binary)?;
-    let install_result = ssh.install_herdr(&remote_herdr, &source.path);
-    source.cleanup();
-    install_result?;
-
-    if !remote_binary_matches(ssh, &remote_herdr)? {
-        return Err(io::Error::other(format!(
-            "installed remote herdr at {}, but it did not report version {}",
-            remote_herdr.shell_path,
-            current_version()
-        )));
-    }
-    warn_if_remote_bin_not_on_path(ssh)?;
-
-    Ok(PreparedRemoteHerdr {
-        remote_herdr,
-        installed_or_replaced: true,
-        stop_after_install_approved,
-    })
+    io::Error::new(
+        kind,
+        format!(
+            "remote host {target}: {candidate_summary}; expected distribution_id {}, version {}, and protocol {} for {}-{}. Herdr does not bootstrap remote binaries. On the remote host, check out the matching {} source tree and run `./install-local.sh`, then retry.",
+            crate::build_info::DISTRIBUTION_ID,
+            current_version(),
+            CURRENT_PROTOCOL,
+            platform.os,
+            platform.arch,
+            crate::build_info::DISTRIBUTION_ID,
+        ),
+    )
 }
 
 fn detect_remote_platform(ssh: &RemoteSsh) -> io::Result<RemotePlatform> {
@@ -822,7 +533,6 @@ fi
     script.push_str(
         r#"if [ -n "$home" ]; then
     emit "$home/.local/share/mise/installs/herdr/$version/bin/herdr"
-    emit "$home/.local/share/mise/installs/github-ogulcancelik-herdr/$version/herdr"
     emit "$home/.nix-profile/bin/herdr"
 fi
 if [ -n "$user" ]; then
@@ -890,110 +600,21 @@ fn remote_binary_matches(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Res
         return Ok(false);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(remote_binary_output_matches(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn remote_binary_output_matches(stdout: &str) -> bool {
     let mut lines = stdout.lines();
     let version = lines.next().unwrap_or_default().trim();
     let status = lines.next().unwrap_or_default();
-    Ok(version == format!("herdr {}", current_version())
-        && parse_client_status_json(status)
-            .map(|status| status.protocol == CURRENT_PROTOCOL)
-            .unwrap_or(false))
-}
 
-fn remote_binary_exists(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Result<bool> {
-    let command = format!("test -x {}", remote_herdr.shell_path);
-    Ok(ssh.sh_output(&command)?.status.success())
-}
-
-fn remote_binary_override_path() -> io::Result<Option<PathBuf>> {
-    let Some(value) = std::env::var_os(REMOTE_BINARY_ENV_VAR) else {
-        return Ok(None);
-    };
-    if value.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{REMOTE_BINARY_ENV_VAR} must not be empty"),
-        ));
-    }
-
-    let path = PathBuf::from(value);
-    let metadata = fs::metadata(&path).map_err(|err| {
-        io::Error::new(
-            err.kind(),
-            format!(
-                "failed to inspect {REMOTE_BINARY_ENV_VAR} path {}: {err}",
-                path.display()
-            ),
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "{REMOTE_BINARY_ENV_VAR} path is not a file: {}",
-                path.display()
-            ),
-        ));
-    }
-
-    Ok(Some(path))
-}
-
-fn install_source_description(platform: &RemotePlatform, override_binary: Option<&Path>) -> String {
-    install_source_description_for(
-        platform,
-        override_binary,
-        local_binary_can_seed_remote(platform),
-    )
-}
-
-fn install_source_description_for(
-    platform: &RemotePlatform,
-    override_binary: Option<&Path>,
-    local_binary_can_seed_remote: bool,
-) -> String {
-    if let Some(path) = override_binary {
-        return format!("{REMOTE_BINARY_ENV_VAR} ({})", path.display());
-    }
-
-    if local_binary_can_seed_remote {
-        "the current local herdr binary".to_string()
-    } else {
-        format!(
-            "the {} {} asset for {}",
-            current_version(),
-            current_channel(),
-            platform.asset_key()
-        )
-    }
-}
-
-fn resolve_install_source(
-    platform: &RemotePlatform,
-    override_binary: Option<PathBuf>,
-) -> io::Result<InstallSource> {
-    if let Some(path) = override_binary {
-        return Ok(InstallSource::persistent(path));
-    }
-
-    if *platform == RemotePlatform::local() {
-        let path = std::env::current_exe()?;
-        if !crate::update::is_package_manager_managed_exe_path(&path) {
-            return Ok(InstallSource::persistent(path));
-        }
-    }
-
-    download_release_asset(platform)
-}
-
-fn local_binary_can_seed_remote(platform: &RemotePlatform) -> bool {
-    if *platform != RemotePlatform::local() {
-        return false;
-    }
-
-    std::env::current_exe()
-        .map(|path| !crate::update::is_package_manager_managed_exe_path(&path))
-        .unwrap_or(false)
+    version == format!("herdr {}", current_version())
+        && parse_client_status_json(status).is_some_and(|status| {
+            status.distribution_id == crate::build_info::DISTRIBUTION_ID
+                && status.protocol == CURRENT_PROTOCOL
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1011,22 +632,12 @@ enum RemoteServerStatus {
 enum RemoteServerRestartReason {
     ProtocolMismatch,
     DaemonDetachMissing,
-    BinaryUpdated,
     VersionMismatch,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RemoteInstallRunningServerPlan {
-    KeepRunning,
-    LiveHandoff,
-    StopRequired(RemoteServerRestartReason),
 }
 
 fn ensure_remote_server_ready(
     ssh: &RemoteSsh,
     remote_herdr: &RemoteHerdr,
-    remote_binary_changed: bool,
-    stop_after_install_approved: bool,
     live_handoff_enabled: bool,
 ) -> io::Result<()> {
     let status = remote_server_status(ssh, remote_herdr)?;
@@ -1040,12 +651,9 @@ fn ensure_remote_server_ready(
         return Ok(());
     };
 
-    let Some(reason) = remote_server_restart_reason(
-        version.as_deref(),
-        protocol,
-        detached_server_daemon,
-        remote_binary_changed,
-    ) else {
+    let Some(reason) =
+        remote_server_restart_reason(version.as_deref(), protocol, detached_server_daemon)
+    else {
         return Ok(());
     };
 
@@ -1059,11 +667,6 @@ fn ensure_remote_server_ready(
         }
     }
 
-    if stop_after_install_approved {
-        stop_remote_server(ssh, remote_herdr)?;
-        return Ok(());
-    }
-
     if confirm_remote_server_stop(ssh.target(), version.as_deref(), protocol, reason)? {
         stop_remote_server(ssh, remote_herdr)?;
     }
@@ -1074,7 +677,6 @@ fn remote_server_restart_reason(
     version: Option<&str>,
     protocol: Option<u32>,
     detached_server_daemon: bool,
-    remote_binary_changed: bool,
 ) -> Option<RemoteServerRestartReason> {
     if protocol != Some(CURRENT_PROTOCOL) {
         return Some(RemoteServerRestartReason::ProtocolMismatch);
@@ -1085,145 +687,7 @@ fn remote_server_restart_reason(
     if version != Some(current_version().as_str()) {
         return Some(RemoteServerRestartReason::VersionMismatch);
     }
-    if remote_binary_changed {
-        return Some(RemoteServerRestartReason::BinaryUpdated);
-    }
     None
-}
-
-fn confirm_remote_install_with_running_server(
-    ssh: &RemoteSsh,
-    remote_herdr: &RemoteHerdr,
-    live_handoff_enabled: bool,
-) -> io::Result<bool> {
-    let target = ssh.target();
-    let status = match remote_server_status(ssh, remote_herdr) {
-        Ok(status) => status,
-        Err(err) => {
-            if !io::stdin().is_terminal() {
-                return Err(io::Error::other(format!(
-                    "could not inspect the running remote herdr server on {target} before installing: {err}; run from an interactive terminal to approve updating the remote binary"
-                )));
-            }
-            eprintln!(
-                "could not inspect the running remote herdr server on {target} before installing: {err}"
-            );
-            eprint!("continue installing the remote herdr binary? [y/N] ");
-            io::stderr().flush()?;
-
-            let mut answer = String::new();
-            io::stdin().read_line(&mut answer)?;
-            let answer = answer.trim().to_ascii_lowercase();
-            if answer != "y" && answer != "yes" {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "remote herdr install cancelled",
-                ));
-            }
-            return Ok(false);
-        }
-    };
-    let RemoteServerStatus::Running {
-        version,
-        protocol,
-        live_handoff,
-        detached_server_daemon,
-    } = &status
-    else {
-        return Ok(false);
-    };
-    let plan = remote_install_running_server_plan(
-        version.as_deref(),
-        *protocol,
-        *detached_server_daemon,
-        true,
-        *live_handoff,
-        live_handoff_enabled,
-    );
-
-    if plan == RemoteInstallRunningServerPlan::KeepRunning {
-        if io::stdin().is_terminal() {
-            eprintln!("remote herdr server on {target} is already compatible:");
-            eprintln!("  server: v{}", version_label(version.as_deref()));
-            eprintln!(
-                "Herdr will install {} without stopping the running remote server.",
-                current_version()
-            );
-        }
-        return Ok(false);
-    }
-
-    if !io::stdin().is_terminal() {
-        match plan {
-            RemoteInstallRunningServerPlan::LiveHandoff => return Ok(false),
-            RemoteInstallRunningServerPlan::StopRequired(_) => {
-                return Err(io::Error::other(format!(
-                    "remote herdr server on {target} is running v{}; run from an interactive terminal to approve stopping it for the update",
-                    version_label(version.as_deref())
-                )));
-            }
-            RemoteInstallRunningServerPlan::KeepRunning => return Ok(false),
-        }
-    }
-
-    if plan == RemoteInstallRunningServerPlan::LiveHandoff {
-        eprintln!("remote herdr server on {target} is currently running:");
-        eprintln!("  server: v{}", version_label(version.as_deref()));
-        eprintln!(
-            "Herdr will install {} and hand off live pane processes to the prepared server.",
-            current_version()
-        );
-        return Ok(false);
-    }
-
-    eprintln!("remote herdr server on {target} is currently running:");
-    eprintln!("  server: v{}", version_label(version.as_deref()));
-    eprintln!(
-        "To complete the remote update, Herdr must stop the running remote server after installing."
-    );
-    eprintln!("This stops active remote pane processes, including shells, dev servers, and tests.");
-    eprintln!();
-    eprint!(
-        "Install {} and stop the remote server now? [y/N] ",
-        current_version()
-    );
-    io::stderr().flush()?;
-
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    let answer = answer.trim().to_ascii_lowercase();
-    if answer != "y" && answer != "yes" {
-        return Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "remote herdr install cancelled",
-        ));
-    }
-
-    Ok(true)
-}
-
-fn remote_install_running_server_plan(
-    version: Option<&str>,
-    protocol: Option<u32>,
-    detached_server_daemon: bool,
-    remote_binary_changed: bool,
-    live_handoff: bool,
-    live_handoff_enabled: bool,
-) -> RemoteInstallRunningServerPlan {
-    let Some(reason) = remote_server_restart_reason(
-        version,
-        protocol,
-        detached_server_daemon,
-        remote_binary_changed,
-    ) else {
-        return RemoteInstallRunningServerPlan::KeepRunning;
-    };
-
-    if live_handoff_enabled && live_handoff {
-        return RemoteInstallRunningServerPlan::LiveHandoff;
-    }
-
-    RemoteInstallRunningServerPlan::StopRequired(reason)
 }
 
 fn remote_server_status(
@@ -1242,6 +706,7 @@ fn remote_server_status(
 
 #[derive(Debug, Deserialize)]
 struct RemoteClientStatusJson {
+    distribution_id: String,
     protocol: u32,
 }
 
@@ -1321,11 +786,6 @@ fn confirm_remote_server_stop(
         RemoteServerRestartReason::DaemonDetachMissing => {
             eprintln!(
                 "the remote server was started by a herdr build that may not survive SSH connection loss. restart it so network drops disconnect only this client."
-            );
-        }
-        RemoteServerRestartReason::BinaryUpdated => {
-            eprintln!(
-                "the remote herdr binary was installed or replaced. restart the remote server so it uses the prepared binary."
             );
         }
         RemoteServerRestartReason::VersionMismatch => {
@@ -1419,208 +879,6 @@ fn wait_for_remote_server_shutdown(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) 
 
 fn version_label(version: Option<&str>) -> &str {
     version.unwrap_or("unknown")
-}
-
-fn warn_if_remote_bin_not_on_path(ssh: &RemoteSsh) -> io::Result<()> {
-    let output = ssh.user_shell_output("command -v herdr")?;
-    if output.status.success()
-        && remote_shell_resolves_managed_install(&String::from_utf8_lossy(&output.stdout))
-    {
-        return Ok(());
-    }
-
-    eprintln!(
-        "herdr: installed remote binary to ~/.local/bin/herdr, but the remote shell does not resolve `herdr` to that path"
-    );
-    Ok(())
-}
-
-fn remote_shell_resolves_managed_install(stdout: &str) -> bool {
-    stdout
-        .lines()
-        .next()
-        .map(str::trim)
-        .is_some_and(|path| path.ends_with("/.local/bin/herdr"))
-}
-
-fn download_release_asset(platform: &RemotePlatform) -> io::Result<InstallSource> {
-    let asset_key = platform.asset_key();
-    let asset = remote_release_asset(&asset_key)?;
-
-    let dir = private_download_dir(&asset_key)?;
-    let path = dir.join("herdr.tmp");
-    let status = Command::new("curl")
-        .args(["-sfL", "--max-time", "120", "-o"])
-        .arg(&path)
-        .arg(&asset.url)
-        .status()
-        .map_err(|err| io::Error::new(err.kind(), format!("download failed: {err}")))?;
-    if !status.success() {
-        let _ = fs::remove_dir_all(&dir);
-        return Err(io::Error::other("download failed"));
-    }
-    if let Some(expected) = &asset.sha256 {
-        if let Err(err) = crate::checksum::verify_sha256(&path, expected) {
-            let _ = fs::remove_dir_all(&dir);
-            return Err(io::Error::new(
-                err.kind(),
-                format!("downloaded remote asset checksum verification failed: {err}"),
-            ));
-        }
-    }
-
-    Ok(InstallSource::temporary(path, dir))
-}
-
-fn fetch_remote_manifest(url: &str) -> io::Result<Vec<u8>> {
-    let output = Command::new("curl")
-        .args([
-            "-sfL",
-            "--retry",
-            "3",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "20",
-            url,
-        ])
-        .output()
-        .map_err(|err| io::Error::new(err.kind(), format!("curl failed: {err}")))?;
-    if !output.status.success() {
-        return Err(command_failed("failed to fetch update manifest", &output));
-    }
-    Ok(output.stdout)
-}
-
-fn remote_asset_info(asset: &RemoteAssetRef) -> RemoteReleaseAsset {
-    RemoteReleaseAsset {
-        url: asset.url().to_string(),
-        sha256: asset.sha256().map(str::to_string),
-    }
-}
-
-fn preview_assets_for_build<'a>(
-    manifest: &'a RemotePreviewManifest,
-    build_id: &str,
-) -> io::Result<(u32, &'a BTreeMap<String, RemoteAssetRef>)> {
-    if manifest.build_id == build_id {
-        return Ok((manifest.protocol, &manifest.assets));
-    }
-    let build = manifest.builds.get(build_id).ok_or_else(|| {
-        io::Error::other(format!(
-            "preview manifest no longer includes build {build_id}; run `herdr update` locally or set {REMOTE_BINARY_ENV_VAR}=target/release/herdr"
-        ))
-    })?;
-    Ok((build.protocol, &build.assets))
-}
-
-fn remote_release_asset(asset_key: &str) -> io::Result<RemoteReleaseAsset> {
-    if crate::build_info::is_preview() {
-        let build_id = crate::build_info::build_id().ok_or_else(|| {
-            io::Error::other("preview client has no build id; set HERDR_REMOTE_BINARY or install Herdr on the remote manually")
-        })?;
-        let manifest_bytes = fetch_remote_manifest(PREVIEW_UPDATE_MANIFEST_URL)?;
-        let manifest: RemotePreviewManifest =
-            serde_json::from_slice(&manifest_bytes).map_err(|err| {
-                io::Error::other(format!("failed to parse preview manifest JSON: {err}"))
-            })?;
-        let (protocol, assets) = preview_assets_for_build(&manifest, build_id)?;
-        if protocol != CURRENT_PROTOCOL {
-            return Err(io::Error::other(format!(
-                "preview manifest has build {build_id} protocol {protocol}, but this client needs protocol {CURRENT_PROTOCOL}; set {REMOTE_BINARY_ENV_VAR}=target/release/herdr or install a matching Herdr on the remote host manually"
-            )));
-        }
-        return assets.get(asset_key).map(remote_asset_info).ok_or_else(|| {
-            io::Error::other(format!(
-                "no {asset_key} binary in the preview manifest for build {build_id}"
-            ))
-        });
-    }
-
-    let current_version = current_version();
-    let manifest_bytes = fetch_remote_manifest(STABLE_UPDATE_MANIFEST_URL)?;
-    let manifest: RemoteUpdateManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|err| io::Error::other(format!("failed to parse update manifest JSON: {err}")))?;
-    let release = manifest.release_for_version(&current_version).ok_or_else(|| {
-        io::Error::other(format!(
-            "release manifest does not include herdr {current_version}; build herdr for {} or install it there manually",
-            asset_key
-        ))
-    })?;
-    if let Some(protocol) = release.protocol {
-        if protocol != CURRENT_PROTOCOL {
-            return Err(io::Error::other(format!(
-                "release manifest has herdr {current_version} protocol {protocol}, but this client needs protocol {CURRENT_PROTOCOL}; set {REMOTE_BINARY_ENV_VAR}=target/release/herdr or install a matching herdr on the remote host manually"
-            )));
-        }
-    }
-    release
-        .assets
-        .get(asset_key)
-        .map(remote_asset_info)
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "no {asset_key} binary in the release manifest for herdr {current_version}"
-            ))
-        })
-}
-
-fn private_download_dir(asset_key: &str) -> io::Result<PathBuf> {
-    let base = std::env::temp_dir();
-    for attempt in 0..100 {
-        let dir = base.join(format!(
-            "herdr-remote-{}-{}-{attempt}",
-            std::process::id(),
-            asset_key
-        ));
-        match fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(err),
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "failed to create private herdr remote download directory",
-    ))
-}
-
-fn confirm_remote_install(
-    target: &str,
-    remote_herdr: &RemoteHerdr,
-    source_description: &str,
-) -> io::Result<()> {
-    if !io::stdin().is_terminal() {
-        return Err(io::Error::other(format!(
-            "matching remote herdr {} is not installed at {}; run from an interactive terminal to approve installation",
-            current_version(),
-            remote_herdr.shell_path
-        )));
-    }
-
-    eprintln!(
-        "matching herdr {} is not installed on {target} for {}.",
-        current_version(),
-        remote_herdr.platform.asset_key()
-    );
-    eprint!(
-        "Install {} to {}? [Y/n] ",
-        source_description, remote_herdr.shell_path
-    );
-    io::stderr().flush()?;
-
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    let answer = answer.trim().to_ascii_lowercase();
-    if answer == "n" || answer == "no" {
-        return Err(io::Error::new(
-            io::ErrorKind::Interrupted,
-            "remote herdr installation cancelled",
-        ));
-    }
-
-    Ok(())
 }
 
 fn remote_bridge_command(remote_herdr: &RemoteHerdr, session_name: &str) -> String {
@@ -2163,43 +1421,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_install_stream_command_avoids_shell_c_wrapper() {
-        let command = remote_install_stream_command("/home/a b/.local/bin/herdr.tmp.123");
-
-        assert_eq!(command, "tee '/home/a b/.local/bin/herdr.tmp.123'");
-    }
-
-    #[test]
-    fn remote_install_prepare_and_commit_scripts_quote_paths() {
-        let remote_herdr = RemoteHerdr::for_platform(RemotePlatform {
-            os: "linux",
-            arch: "x86_64",
-        });
-        let prepare = remote_install_prepare_script(&remote_herdr);
-
-        assert!(prepare.contains("mkdir -p \"$dir\""));
-        assert!(prepare.contains("printf '%s\\0%s\\0' \"$tmp\" \"$dest\""));
-        assert_eq!(
-            parse_remote_install_paths(b"/home/a b/herdr.tmp.42\0/home/a b/herdr\0").unwrap(),
-            (
-                "/home/a b/herdr.tmp.42".to_string(),
-                "/home/a b/herdr".to_string()
-            )
-        );
-        assert_eq!(
-            parse_remote_install_paths(b"/home/a b\n/herdr.tmp.42\0/home/a b\n/herdr\0").unwrap(),
-            (
-                "/home/a b\n/herdr.tmp.42".to_string(),
-                "/home/a b\n/herdr".to_string()
-            )
-        );
-        assert_eq!(
-            remote_install_commit_script("/home/a b/herdr.tmp.42", "/home/a b/herdr"),
-            "set -eu\nchmod 755 '/home/a b/herdr.tmp.42'\nmv '/home/a b/herdr.tmp.42' '/home/a b/herdr'\n"
-        );
-    }
-
-    #[test]
     fn extract_remote_args_removes_space_form() {
         let args = vec![
             "herdr".into(),
@@ -2354,16 +1575,18 @@ mod tests {
     #[test]
     fn remote_platform_maps_uname_values() {
         assert_eq!(
-            RemotePlatform::from_uname("Linux", "amd64")
-                .unwrap()
-                .asset_key(),
-            "linux-x86_64"
+            RemotePlatform::from_uname("Linux", "amd64"),
+            Some(RemotePlatform {
+                os: "linux",
+                arch: "x86_64",
+            })
         );
         assert_eq!(
-            RemotePlatform::from_uname("Darwin", "arm64")
-                .unwrap()
-                .asset_key(),
-            "macos-aarch64"
+            RemotePlatform::from_uname("Darwin", "arm64"),
+            Some(RemotePlatform {
+                os: "macos",
+                arch: "aarch64",
+            })
         );
         assert!(RemotePlatform::from_uname("FreeBSD", "x86_64").is_none());
     }
@@ -2469,7 +1692,13 @@ mod tests {
             remote_bridge_command(&remote_herdr, crate::session::DEFAULT_SESSION_NAME),
             "exec /opt/homebrew/bin/herdr remote-client-bridge"
         );
-        assert_eq!(remote_herdr.platform.asset_key(), "macos-aarch64");
+        assert_eq!(
+            remote_herdr.platform,
+            RemotePlatform {
+                os: "macos",
+                arch: "aarch64",
+            }
+        );
     }
 
     #[test]
@@ -2519,9 +1748,7 @@ mod tests {
         assert!(
             script.contains("emit \"$home/.local/share/mise/installs/herdr/$version/bin/herdr\"")
         );
-        assert!(script.contains(
-            "emit \"$home/.local/share/mise/installs/github-ogulcancelik-herdr/$version/herdr\""
-        ));
+        assert!(!script.contains("ogulcancelik"));
         assert!(script.contains("emit \"$home/.nix-profile/bin/herdr\""));
         assert!(script.contains("emit \"/etc/profiles/per-user/$user/bin/herdr\""));
         assert!(script.contains("emit \"/run/current-system/sw/bin/herdr\""));
@@ -2580,27 +1807,54 @@ mod tests {
     }
 
     #[test]
-    fn remote_shell_path_warning_accepts_managed_install() {
-        assert!(remote_shell_resolves_managed_install(
-            "/home/can/.local/bin/herdr\n"
-        ));
-        assert!(remote_shell_resolves_managed_install(
-            "/Users/can/.local/bin/herdr\n"
-        ));
-        assert!(!remote_shell_resolves_managed_install(
-            "/usr/local/bin/herdr\n"
-        ));
-        assert!(!remote_shell_resolves_managed_install(""));
+    fn remote_binary_output_requires_distribution_version_and_protocol() {
+        let output = |distribution_id: &str, version: &str, protocol: u32| {
+            format!(
+                "herdr {version}\n{{\"distribution_id\":\"{distribution_id}\",\"protocol\":{protocol},\"binary\":\"/bin/herdr\"}}\n"
+            )
+        };
+
+        assert!(remote_binary_output_matches(&output(
+            crate::build_info::DISTRIBUTION_ID,
+            &current_version(),
+            CURRENT_PROTOCOL,
+        )));
+        assert!(!remote_binary_output_matches(&output(
+            "ogulcancelik/herdr",
+            &current_version(),
+            CURRENT_PROTOCOL,
+        )));
+        assert!(!remote_binary_output_matches(&output(
+            crate::build_info::DISTRIBUTION_ID,
+            "0.0.0",
+            CURRENT_PROTOCOL,
+        )));
+        assert!(!remote_binary_output_matches(&output(
+            crate::build_info::DISTRIBUTION_ID,
+            &current_version(),
+            CURRENT_PROTOCOL.saturating_add(1),
+        )));
+        assert!(!remote_binary_output_matches(&format!(
+            "herdr {}\n{{\"protocol\":{CURRENT_PROTOCOL}}}\n",
+            current_version()
+        )));
     }
 
     #[test]
-    fn parse_client_status_json_reads_protocol() {
-        assert_eq!(
-            parse_client_status_json(r#"{"version":"x","protocol":8,"binary":"/bin/herdr"}"#)
-                .map(|status| status.protocol),
-            Some(8)
-        );
-        assert!(parse_client_status_json(r#"{"protocol":"unknown"}"#).is_none());
+    fn remote_preinstall_error_points_to_source_install() {
+        let error = remote_preinstall_error(
+            "remote.example",
+            &RemotePlatform {
+                os: "linux",
+                arch: "x86_64",
+            },
+            1,
+        )
+        .to_string();
+
+        assert!(error.contains("distribution_id peisongxiao/herdr"));
+        assert!(error.contains("does not bootstrap remote binaries"));
+        assert!(error.contains("./install-local.sh"));
     }
 
     #[test]
@@ -2647,211 +1901,25 @@ mod tests {
     }
 
     #[test]
-    fn remote_update_manifest_uses_root_assets_for_latest_version() {
-        let manifest: RemoteUpdateManifest = serde_json::from_str(
-            r#"{
-                "version": "1.2.3",
-                "assets": {
-                    "linux-x86_64": "https://example.com/latest"
-                },
-                "releases": {
-                    "1.2.3": {
-                        "assets": {
-                            "linux-x86_64": "https://example.com/archive"
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            manifest
-                .release_for_version("1.2.3")
-                .and_then(|release| release.assets.get("linux-x86_64"))
-                .map(RemoteAssetRef::url),
-            Some("https://example.com/latest")
-        );
-    }
-
-    #[test]
-    fn remote_update_manifest_reads_archived_release_assets() {
-        let manifest: RemoteUpdateManifest = serde_json::from_str(
-            r#"{
-                "version": "1.2.4",
-                "assets": {
-                    "linux-x86_64": "https://example.com/latest"
-                },
-                "releases": {
-                    "1.2.3": {
-                        "notes": "ignored",
-                        "assets": {
-                            "linux-x86_64": "https://example.com/archive"
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            manifest
-                .release_for_version("1.2.3")
-                .and_then(|release| release.assets.get("linux-x86_64"))
-                .map(RemoteAssetRef::url),
-            Some("https://example.com/archive")
-        );
-    }
-
-    #[test]
-    fn remote_update_manifest_uses_archived_release_protocol() {
-        let manifest: RemoteUpdateManifest = serde_json::from_str(
-            r#"{
-                "version": "1.2.4",
-                "protocol": 42,
-                "assets": {
-                    "linux-x86_64": "https://example.com/latest"
-                },
-                "releases": {
-                    "1.2.3": {
-                        "notes": "ignored",
-                        "protocol": 41,
-                        "assets": {
-                            "linux-x86_64": "https://example.com/archive"
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            manifest
-                .release_for_version("1.2.3")
-                .and_then(|release| release.protocol),
-            Some(41)
-        );
-    }
-
-    #[test]
-    fn remote_update_manifest_does_not_inherit_latest_protocol_for_archived_assets() {
-        let manifest: RemoteUpdateManifest = serde_json::from_str(
-            r#"{
-                "version": "1.2.4",
-                "protocol": 42,
-                "assets": {
-                    "linux-x86_64": "https://example.com/latest"
-                },
-                "releases": {
-                    "1.2.3": {
-                        "notes": "ignored",
-                        "assets": {
-                            "linux-x86_64": "https://example.com/archive"
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            manifest
-                .release_for_version("1.2.3")
-                .and_then(|release| release.protocol),
-            None
-        );
-    }
-
-    #[test]
-    fn remote_preview_manifest_falls_back_to_archived_exact_build_assets() {
-        let manifest: RemotePreviewManifest = serde_json::from_str(
-            r#"{
-                "build_id": "2026-06-06-new",
-                "protocol": 12,
-                "assets": {
-                    "linux-x86_64": {
-                        "url": "https://example.com/new",
-                        "sha256": "new"
-                    }
-                },
-                "builds": {
-                    "2026-06-02-old": {
-                        "protocol": 11,
-                        "assets": {
-                            "linux-x86_64": {
-                                "url": "https://example.com/old",
-                                "sha256": "old"
-                            }
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        let (protocol, assets) =
-            preview_assets_for_build(&manifest, "2026-06-02-old").expect("archived build");
-        let asset = assets.get("linux-x86_64").expect("asset");
-        assert_eq!(protocol, 11);
-        assert_eq!(asset.url(), "https://example.com/old");
-        assert_eq!(asset.sha256(), Some("old"));
-    }
-
-    #[test]
     fn remote_server_restart_reason_requires_stop_for_protocol_mismatch() {
         assert_eq!(
-            remote_server_restart_reason(Some(&current_version()), Some(0), true, false),
+            remote_server_restart_reason(Some(&current_version()), Some(0), true),
             Some(RemoteServerRestartReason::ProtocolMismatch)
-        );
-    }
-
-    #[test]
-    fn remote_server_restart_reason_allows_unchanged_compatible_server() {
-        assert_eq!(
-            remote_server_restart_reason(
-                Some(&current_version()),
-                Some(CURRENT_PROTOCOL),
-                true,
-                false
-            ),
-            None
         );
     }
 
     #[test]
     fn remote_server_restart_reason_requires_restart_for_old_daemon() {
         assert_eq!(
-            remote_server_restart_reason(
-                Some(&current_version()),
-                Some(CURRENT_PROTOCOL),
-                false,
-                false
-            ),
+            remote_server_restart_reason(Some(&current_version()), Some(CURRENT_PROTOCOL), false,),
             Some(RemoteServerRestartReason::DaemonDetachMissing)
-        );
-    }
-
-    #[test]
-    fn remote_server_restart_reason_requires_restart_after_helper_update() {
-        assert_eq!(
-            remote_server_restart_reason(
-                Some(&current_version()),
-                Some(CURRENT_PROTOCOL),
-                true,
-                true
-            ),
-            Some(RemoteServerRestartReason::BinaryUpdated)
         );
     }
 
     #[test]
     fn remote_server_restart_reason_offers_restart_for_version_mismatch() {
         assert_eq!(
-            remote_server_restart_reason(Some("0.0.0"), Some(CURRENT_PROTOCOL), true, false),
-            Some(RemoteServerRestartReason::VersionMismatch)
-        );
-        assert_eq!(
-            remote_server_restart_reason(None, Some(CURRENT_PROTOCOL), true, false),
+            remote_server_restart_reason(Some("0.0.0"), Some(CURRENT_PROTOCOL), true),
             Some(RemoteServerRestartReason::VersionMismatch)
         );
     }
@@ -2859,142 +1927,9 @@ mod tests {
     #[test]
     fn remote_server_restart_reason_allows_current_server() {
         assert_eq!(
-            remote_server_restart_reason(
-                Some(&current_version()),
-                Some(CURRENT_PROTOCOL),
-                true,
-                false
-            ),
+            remote_server_restart_reason(Some(&current_version()), Some(CURRENT_PROTOCOL), true,),
             None
         );
-    }
-
-    #[test]
-    fn remote_install_plan_keeps_compatible_running_server() {
-        assert_eq!(
-            remote_install_running_server_plan(
-                Some(&current_version()),
-                Some(CURRENT_PROTOCOL),
-                true,
-                false,
-                false,
-                false
-            ),
-            RemoteInstallRunningServerPlan::KeepRunning
-        );
-    }
-
-    #[test]
-    fn remote_install_plan_requires_stop_for_old_daemon() {
-        assert_eq!(
-            remote_install_running_server_plan(
-                Some(&current_version()),
-                Some(CURRENT_PROTOCOL),
-                false,
-                true,
-                false,
-                false
-            ),
-            RemoteInstallRunningServerPlan::StopRequired(
-                RemoteServerRestartReason::DaemonDetachMissing
-            )
-        );
-    }
-
-    #[test]
-    fn remote_install_plan_requires_stop_after_helper_update() {
-        assert_eq!(
-            remote_install_running_server_plan(
-                Some(&current_version()),
-                Some(CURRENT_PROTOCOL),
-                true,
-                true,
-                false,
-                false
-            ),
-            RemoteInstallRunningServerPlan::StopRequired(RemoteServerRestartReason::BinaryUpdated)
-        );
-    }
-
-    #[test]
-    fn remote_install_plan_requires_stop_for_incompatible_running_server() {
-        assert_eq!(
-            remote_install_running_server_plan(
-                Some("0.0.0"),
-                Some(CURRENT_PROTOCOL),
-                true,
-                true,
-                false,
-                false
-            ),
-            RemoteInstallRunningServerPlan::StopRequired(
-                RemoteServerRestartReason::VersionMismatch
-            )
-        );
-    }
-
-    #[test]
-    fn remote_install_plan_uses_live_handoff_for_incompatible_running_server() {
-        assert_eq!(
-            remote_install_running_server_plan(
-                Some("0.0.0"),
-                Some(CURRENT_PROTOCOL),
-                true,
-                true,
-                true,
-                true
-            ),
-            RemoteInstallRunningServerPlan::LiveHandoff
-        );
-    }
-
-    #[test]
-    fn install_source_description_uses_override_binary() {
-        let platform = RemotePlatform {
-            os: "linux",
-            arch: "aarch64",
-        };
-        assert_eq!(
-            install_source_description_for(&platform, Some(Path::new("/tmp/herdr-aarch64")), false),
-            "HERDR_REMOTE_BINARY (/tmp/herdr-aarch64)"
-        );
-    }
-
-    #[test]
-    fn install_source_description_uses_local_binary_when_allowed() {
-        let platform = RemotePlatform::local();
-
-        assert_eq!(
-            install_source_description_for(&platform, None, true),
-            "the current local herdr binary"
-        );
-    }
-
-    #[test]
-    fn install_source_description_uses_release_asset_when_local_binary_cannot_seed_remote() {
-        let platform = RemotePlatform::local();
-
-        assert_eq!(
-            install_source_description_for(&platform, None, false),
-            format!(
-                "the {} {} asset for {}",
-                current_version(),
-                current_channel(),
-                platform.asset_key()
-            )
-        );
-    }
-
-    #[test]
-    fn resolve_install_source_uses_override_binary_without_temporary_cleanup() {
-        let platform = RemotePlatform {
-            os: "linux",
-            arch: "aarch64",
-        };
-        let source = resolve_install_source(&platform, Some(PathBuf::from("/tmp/herdr-aarch64")))
-            .expect("override source");
-        assert_eq!(source.path, PathBuf::from("/tmp/herdr-aarch64"));
-        assert!(source.temporary_dir.is_none());
     }
 
     fn remote_env_lock() -> &'static std::sync::Mutex<()> {
@@ -3079,21 +2014,5 @@ mod tests {
             filename.starts_with("herdr-r-"),
             "expected hashed fallback, got {filename}"
         );
-    }
-
-    #[test]
-    fn install_source_cleanup_removes_temporary_directory() {
-        let dir = std::env::temp_dir().join(format!(
-            "herdr-install-source-cleanup-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir(&dir).expect("create temp dir");
-        let path = dir.join("herdr.tmp");
-        fs::write(&path, b"test").expect("write temp file");
-
-        InstallSource::temporary(path, dir.clone()).cleanup();
-
-        assert!(!dir.exists());
     }
 }

@@ -63,7 +63,7 @@ Host workbox
 herdr --remote workbox
 ```
 
-リモートアタッチは x86_64 と aarch64 の Linux および macOS ホストをサポートします。Herdr はリモートのプラットフォームを確認し、リモートの `PATH` 上にある一致する `herdr` を優先し、次に `~/.local/bin/herdr` を確認します。一致するバイナリがない場合、対話的な実行では `~/.local/bin/herdr` へのインストールを提案します。非対話的な実行はホストを変更せずに失敗します。`~/.local/bin` がリモートの `PATH` にない場合、Herdr はインストール後に警告します。
+リモートアタッチは x86_64 と aarch64 の Linux/macOS ホストをサポートします。remote host には互換性のある `peisongxiao/herdr` build が事前 install されている必要があります。Herdr は remote `PATH` と source installer の default `~/.local/bin/herdr` を確認しますが、remote binary の copy/download/install/replace は行いません。欠落または非互換の場合は、remote source checkout を更新してそこで `./install-local.sh` を再実行する案内とともに失敗します。
 
 ネイティブ Windows の `herdr --remote` は Windows ベータの範囲外です。Windows からはサーバーに SSH してそこで `herdr` を実行してください。
 
@@ -77,13 +77,7 @@ herdr --remote workbox --handoff
 
 先にサーバーへ SSH してそこで `herdr` を実行した場合、Herdr は完全にサーバー上で動きます。このモードは便利でシンプルですが、通常のターミナルテキスト貼り付けを超えてローカルデスクトップのクリップボードにはアクセスできません。
 
-ローカルとリモートのプラットフォームが一致する場合、直接インストールでは Herdr は現在のローカルバイナリをコピーできます。Homebrew、mise、Nix のインストールの場合、またはプラットフォームが異なる場合は、`https://herdr.dev/latest.json` から現在のクライアントバージョンに一致するリリースアセットをダウンロードします。
-
-ローカルビルドやカスタムバイナリの場合は、リモートアタッチの前に `HERDR_REMOTE_BINARY` にローカルファイルパスを設定してください。
-
-```bash
-HERDR_REMOTE_BINARY=target/release/herdr herdr --remote workbox
-```
+remote attach は host を provision しません。attach 前に両方の machine へこの fork を source から install してください。
 
 ## リモートの名前付きセッション
 
@@ -117,7 +111,7 @@ herdr agent start reviewer --ssh workbox --agent opencode --cwd /repo -- opencod
 
 direct federation は現在 Unix-only です。local server は OpenSSH で認証し、必要なら remote server を起動し、protocol、peer federation、remote presentation を確認して、任意の official integration を準備し、remote agent を起動して local workspace へ pane を delegate します。CLI は managed SSH 前に対話 session の意味を変える effective SSH config を拒否し、server は SSH-backed agent/API request に同じ境界を強制します。
 
-delegated pane と peer bridge は runtime-only で、detach 可能な remote session ではありません。local owner pane の close、local Herdr server の stop、SSH transport の喪失は remote pane と agent を終了します。remote host で継続させるには切断前に presentation pane 内で `herdr remote-handoff` を実行してください。これは update や `herdr --remote` の server replacement `--handoff` とは別です。
+delegated pane と peer bridge は runtime-only で、detach 可能な remote session ではありません。local owner pane の close、local Herdr server の stop、SSH transport の喪失は remote pane と agent を終了します。remote host で継続させるには切断前に presentation pane 内で `herdr remote-handoff` を実行してください。これは `herdr --remote` の server replacement `--handoff` とは別です。
 
 integration は `--agent AGENT` から選び、省略時は argv の先頭 command を認識します。hook が別管理または対応 agent でない場合は `--no-remote-integration` を使います。`--ssh` は任意 SSH option ではなく target を受けるため、port、identity、jump host は `~/.ssh/config` に置きます。named remote session は次のように指定します:
 
@@ -127,13 +121,12 @@ herdr agent start reviewer --ssh workbox --ssh-session agents --agent opencode -
 
 direct SSH federation の session selection は明示的です。`agent start --ssh workbox` と pane の `ssh workbox` は remote `default` を明示的に渡すため、継承または SSH で受理された `HERDR_SESSION`、`HERDR_SOCKET_PATH`、`HERDR_CLIENT_SOCKET_PATH` は setup/API/final attach を redirect できません。named session は `--ssh-session NAME` が必要で、plain pane SSH が local state/env/SSH config から選ぶことはありません。
 
-`herdr --remote` と異なり、direct federation は remote Herdr を copy/download/install/replace しません。検出順は次のとおりです:
+direct federation も `herdr --remote` と同じ事前 install 条件を持ち、host を provision しません。検出順は次のとおりです:
 
 1. remote `PATH` 上の `herdr`
 2. `~/.local/bin/herdr`
-3. 一般的な system、Homebrew/Linuxbrew、mise、Nix profile location
 
-そのため `~/.local/bin` が noninteractive SSH の `PATH` になくても `install-local.sh` の default destination を検出できます。binary がなければ明示的な install warning、protocol や capability が異なれば両 machine の update を求める compatibility warning になります。explicit agent/API request は unmanaged SSH shell に暗黙 fallback せず失敗します。pane shim は理由を表示して private connection を cleanup し、元の raw argv で実際の SSH を実行します。
+そのため `~/.local/bin` が noninteractive SSH の `PATH` になくても `install-local.sh` の default destination を検出できます。binary がなければ明示的な source-install warning になります。protocol や capability が異なる場合は、両方の `peisongxiao/herdr` checkout を更新して installer を再実行してください。explicit agent/API request は unmanaged SSH shell に暗黙 fallback せず失敗します。pane shim は理由を表示して private connection を cleanup し、元の raw argv で実際の SSH を実行します。
 
 双方向 awareness には account 用 remote Unix-domain socket forwarding の許可も必要です。制限時は SSH daemon policy、account rule、`authorized_keys` の key option を確認してください。拒否時、Herdr は remote Unix-socket forwarding と具体的 policy を示す `remote peer bridge failed` を保持します。explicit agent/API start は停止し、pane shim は同じ診断後に raw SSH へ fallback します。
 
@@ -186,7 +179,7 @@ herdr remote-handoff
 
 `remote-handoff` は cursor-only で、host、pane id、target を受けません。remote daemon は delegation を除き、同じ live pane を自身の host の新 workspace に置きます。既存 workspace へ merge せず、attach 済み remote TUI の focus も変えません。managed attach は終了し old owner pane が閉じます。その pane が deeper remote presentation を所有または準備中なら intermediate handoff は拒否されるため、setup を完了/取消しして innermost pane を先に handoff します。full remote session で続けるには `herdr --remote workbox` または ordinary SSH 後の `herdr` で新 workspace を選びます。
 
-これは update live handoff と無関係です。`remote-handoff` は delegated pane 一つを host workspace に戻し、`update --handoff` / `--remote --handoff` は全 pane を保とうとしながら running server を置換します。
+これは remote-attach server handoff とは別です。`remote-handoff` は delegated pane 一つを host workspace に戻し、`herdr --remote --handoff` は全 pane を保とうとしながら running remote server を置換します。
 
 ### Nested SSH と takeover
 

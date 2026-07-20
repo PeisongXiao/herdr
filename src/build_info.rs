@@ -1,6 +1,7 @@
 //! Build identity helpers.
 
 pub const BASE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const DISTRIBUTION_ID: &str = "peisongxiao/herdr";
 
 pub fn channel() -> &'static str {
     non_empty(option_env!("HERDR_BUILD_CHANNEL")).unwrap_or("stable")
@@ -20,10 +21,6 @@ pub fn version() -> String {
     }
 }
 
-pub fn is_preview() -> bool {
-    channel() == "preview"
-}
-
 fn non_empty(value: Option<&'static str>) -> Option<&'static str> {
     value.and_then(|value| {
         let trimmed = value.trim();
@@ -40,5 +37,10 @@ mod tests {
     #[test]
     fn stable_version_defaults_to_cargo_version() {
         assert!(!super::version().is_empty());
+    }
+
+    #[test]
+    fn distribution_id_is_stable() {
+        assert_eq!(super::DISTRIBUTION_ID, "peisongxiao/herdr");
     }
 }

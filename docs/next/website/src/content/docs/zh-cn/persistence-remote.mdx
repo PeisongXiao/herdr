@@ -63,7 +63,7 @@ Host workbox
 herdr --remote workbox
 ```
 
-远程连接支持 x86_64 和 aarch64 的 Linux 与 macOS 主机。Herdr 会检查远程平台,优先使用远程 `PATH` 上已有的匹配 `herdr`,然后检查 `~/.local/bin/herdr`。如果没有匹配的二进制文件,交互式运行会询问是否安装到 `~/.local/bin/herdr`;非交互式运行则直接失败,不会修改主机。如果 `~/.local/bin` 不在远程 `PATH` 上,Herdr 会在安装后发出警告。
+远程连接支持 x86_64 和 aarch64 的 Linux/macOS 主机。远程主机必须已经安装兼容的 `peisongxiao/herdr` build。Herdr 会检查远程 `PATH` 和 source installer 的默认位置 `~/.local/bin/herdr`,但不会复制、下载、安装或替换远程二进制。缺失或不兼容时会失败,并提示更新远程 source checkout、在那里重新运行 `./install-local.sh`。
 
 Windows 原生的 `herdr --remote` 不在 Windows 测试版范围内。在 Windows 上请 SSH 到服务器并在那里运行 `herdr`。
 
@@ -77,13 +77,7 @@ herdr --remote workbox --handoff
 
 如果你先 SSH 到服务器再在那里运行 `herdr`,Herdr 就完全运行在服务器上。这种模式简单实用,但除了普通的终端文本粘贴之外,它无法访问你本地桌面的剪贴板。
 
-当本地和远程平台一致时,对于直接安装,Herdr 可以直接复制当前本地二进制文件。对于 Homebrew、mise 和 Nix 安装,或平台不一致时,它会从 `https://herdr.dev/latest.json` 下载与当前客户端版本匹配的发布产物。
-
-对于本地构建或自定义二进制文件,在远程连接前设置 `HERDR_REMOTE_BINARY` 指向本地文件路径。
-
-```bash
-HERDR_REMOTE_BINARY=target/release/herdr herdr --remote workbox
-```
+远程连接不会 provision 主机。连接前请在两台机器上都从源码安装这个 fork。
 
 ## 远程命名会话
 
@@ -117,7 +111,7 @@ herdr agent start reviewer --ssh workbox --agent opencode --cwd /repo -- opencod
 
 这条 federation 路径目前仅支持 Unix。本地服务器使用 OpenSSH 认证,必要时启动远程服务器,检查协议、peer federation 和 remote presentation 能力,可选地准备官方智能体集成,再在远程启动智能体并把窗格委派到本地工作区。CLI 在打开托管 SSH 前拒绝改变交互式会话语义的有效 SSH 配置;服务器对 SSH-backed agent 和 API 请求执行同样检查。
 
-委派窗格与 peer bridge 都只是运行时状态,并不是可分离的远程会话。关闭本地所有者窗格、停止本地 Herdr 服务器或丢失 SSH transport 会终止远程窗格和智能体。要让工作继续留在远程主机,请在断开前从展示窗格内运行 `herdr remote-handoff`。这个 terminal handoff 不同于更新和 `herdr --remote` 使用的服务器替换 `--handoff`。
+委派窗格与 peer bridge 都只是运行时状态,并不是可分离的远程会话。关闭本地所有者窗格、停止本地 Herdr 服务器或丢失 SSH transport 会终止远程窗格和智能体。要让工作继续留在远程主机,请在断开前从展示窗格内运行 `herdr remote-handoff`。这个 terminal handoff 不同于 `herdr --remote` 使用的服务器替换 `--handoff`。
 
 Herdr 优先使用 `--agent AGENT` 选择集成,省略时识别 argv 的第一个命令。hook 已由其他方式管理或命令不是受支持智能体时,用 `--no-remote-integration`。`--ssh` 接受 SSH 目标而不是任意 SSH 选项;端口、identity、jump host 等应写入 `~/.ssh/config`。命名远程会话使用:
 
@@ -127,13 +121,12 @@ herdr agent start reviewer --ssh workbox --ssh-session agents --agent opencode -
 
 直接 SSH federation 的会话选择是显式的。`agent start --ssh workbox` 和窗格内 `ssh workbox` 都显式传递远程 `default`,所以继承或 SSH 接受的 `HERDR_SESSION`、`HERDR_SOCKET_PATH`、`HERDR_CLIENT_SOCKET_PATH` 不能重定向设置、API 或最终 attach。命名会话必须使用 `--ssh-session NAME`;plain pane SSH 不会从本地状态、环境或 SSH 配置选择它。
 
-与 `herdr --remote` 不同,直接 federation 不会复制、下载、安装或替换远程 Herdr。发现顺序是:
+直接 federation 与 `herdr --remote` 有相同的预安装要求,不会 provision 主机。发现顺序是:
 
 1. 远程 `PATH` 中的 `herdr`
 2. `~/.local/bin/herdr`
-3. 常见系统、Homebrew/Linuxbrew、mise 与 Nix profile 路径
 
-因此即使 `~/.local/bin` 不在非交互 SSH 的 `PATH` 中,也能发现 `install-local.sh` 的默认目标。没有二进制时会给出明确安装提示;远程协议不同或缺少任一能力时会要求两端更新。显式 agent/API 启动会失败而不会悄悄变成普通 shell;窗格 shim 会报告原因、清理私有连接,再按原始 argv 运行真实 SSH。
+因此即使 `~/.local/bin` 不在非交互 SSH 的 `PATH` 中,也能发现 `install-local.sh` 的默认目标。没有二进制时会给出明确的源码安装提示;远程协议不同或缺少任一能力时,请更新两端的 `peisongxiao/herdr` checkout 并重新运行 installer。显式 agent/API 启动会失败而不会悄悄变成普通 shell;窗格 shim 会报告原因、清理私有连接,再按原始 argv 运行真实 SSH。
 
 完整双向感知还要求 SSH 允许为该账号远程转发 Unix-domain socket。若受限,同时检查 daemon 的 forwarding 策略、账号规则以及 `authorized_keys` 中附加到密钥的选项。被拒绝时,Herdr 保留说明 remote Unix-socket forwarding 和具体策略原因的 `remote peer bridge failed` 诊断。显式 agent/API 启动停止,窗格 shim 则显示相同诊断后回退到原始 SSH。
 
@@ -186,7 +179,7 @@ herdr remote-handoff
 
 `remote-handoff` 只作用于光标所在窗格,不接收 host、pane id 或 target。远程 daemon 会移除 delegation,把同一实时窗格放进真实主机上的新工作区;它不会合并到现有工作区,也不会改变已经 attach 的远程 TUI 焦点。托管 attach 随后结束并关闭旧所有者窗格。若该窗格拥有或正在准备更深的远程展示,Herdr 会拒绝中间层 handoff;先完成或取消设置,再 handoff 最内层窗格。之后可用 `herdr --remote workbox`,或普通 SSH 后运行 `herdr`,打开完整远程会话并选择新工作区。
 
-这和 update live handoff 无关:`herdr remote-handoff` 只把一个委派窗格放回主机工作区;`herdr update --handoff` 与 `herdr --remote --handoff` 替换服务器并尝试保留全部窗格。
+这与 remote-attach server handoff 不同:`herdr remote-handoff` 只把一个委派窗格放回主机工作区;`herdr --remote --handoff` 替换运行中的远程服务器并尝试保留全部窗格。
 
 ### 嵌套 SSH 与 takeover
 
