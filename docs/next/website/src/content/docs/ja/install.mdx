@@ -77,11 +77,12 @@ Herdr の checkout からローカルインストーラーを使います:
 ```bash
 ./install-local.sh --check
 ./install-local.sh
+./install-local.sh --clean-install
 ```
 
 このスクリプトは x86_64/aarch64 の Linux と macOS に対応します。Bash、利用可能な `cargo` と `rustc`、正確に Zig `0.15.2`、動作する C compiler/linker が必要です。`CC` が設定されていればそれを使い、なければ `cc`、`clang`、`gcc` の順で探します。不足または利用不能なツールは個別に報告しますが、package manager は実行しません。必要な Zig がデフォルトの `PATH` にない場合は `ZIG=/path/to/zig` を設定します。checkout の native binary だけをインストールするため、Cargo の cross-target build は拒否されます。
 
-`--check` は `cargo --version` と `rustc --version` を確認し、最小 C プログラムを compile/link し、Zig の正確なバージョンを検証します。Herdr をビルドせずに platform、解決した Zig、隔離 build cache、install destination を表示します。デフォルトでは locked release build を行い、`$HOME/.local/bin/herdr` を原子的に置き換えます。artifact は `${XDG_CACHE_HOME:-$HOME/.cache}/herdr/install-local` 配下で checkout path ごとに隔離され、別 checkout や Docker bind mount の古い native-library path を再利用しません。明示的な `CARGO_TARGET_DIR` はこれを上書きします。`--prefix DIR` または `PREFIX` で prefix、`--bin-dir DIR` で binary directory、`--debug` で debug build を選べます。destination が `PATH` にない場合は警告しますが、direct SSH federation はデフォルトの `~/.local/bin/herdr` を検出できます。
+`--check` は `cargo --version` と `rustc --version` を確認し、最小 C プログラムを compile/link し、Zig の正確なバージョンを検証します。Herdr をビルドせずに platform、解決した Zig、隔離 build cache、install destination を表示します。デフォルトでは locked release build を行い、`$HOME/.local/bin/herdr` を原子的に置き換えます。artifact は `${XDG_CACHE_HOME:-$HOME/.cache}/herdr/install-local` 配下で checkout path ごとに隔離され、別 checkout や Docker bind mount の古い native-library path を再利用しません。明示的な `CARGO_TARGET_DIR` はこれを上書きします。`--prefix DIR` または `PREFIX` で prefix、`--bin-dir DIR` で binary directory、`--debug` で debug build を選べます。`--clean-install` は選択した profile 専用の明示的で破壊的な factory reset で、この flag 自体が reset を許可します。release は `herdr`、`--debug` は `herdr-dev` を対象にし、candidate を先に stage してから default/named session server を停止し、その profile の全 session と remote recovery ticket を含む config/state tree を quarantine・削除して candidate を install します。owning server の停止で install が中断されるため、Herdr 内からの実行は拒否されます。recovery ticket の削除は hidden remote process を取り残す可能性があります。外部 agent/MCP/SSH 設定、project、反対側の profile、build cache は削除しません。destination が `PATH` にない場合は警告しますが、direct SSH federation はデフォルトの `~/.local/bin/herdr` を検出できます。
 
 ソースインストールを更新するには checkout を更新して再実行します。ファイルを置き換えても、すでに動作中の Herdr サーバープロセスは置き換わりません。新しい build を使わせるにはセッションを再起動するか対応する live handoff を実行してください。agent integration は別管理で、`install-local.sh` は install/update しません。
 

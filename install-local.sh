@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-usage: ./install-local.sh [--prefix DIR] [--bin-dir DIR] [--debug] [--check]
+usage: ./install-local.sh [--prefix DIR] [--bin-dir DIR] [--debug] [--check] [--clean-install]
 
 Build Herdr from this checkout and install the binary locally.
 
@@ -12,6 +12,8 @@ Options:
   --bin-dir DIR  install the herdr binary directly into DIR
   --debug        build target/debug/herdr instead of target/release/herdr
   --check        only check dependencies and print the install destination
+  --clean-install
+                 factory reset the selected Herdr profile before installation
 USAGE
 }
 
@@ -71,6 +73,7 @@ prefix="${PREFIX:-$HOME/.local}"
 bin_dir=""
 profile="release"
 check_only=0
+clean_install=0
 zig_cmd="${ZIG:-zig}"
 
 while [ "$#" -gt 0 ]; do
@@ -101,6 +104,10 @@ while [ "$#" -gt 0 ]; do
       check_only=1
       shift
       ;;
+    --clean-install)
+      clean_install=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -112,6 +119,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$prefix" ] || die "--prefix must not be empty"
+[ "$check_only" -eq 0 ] || [ "$clean_install" -eq 0 ] || \
+  die "--clean-install cannot be combined with --check"
 if [ -z "$bin_dir" ]; then
   bin_dir="$prefix/bin"
 fi
@@ -119,6 +128,79 @@ fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir"
+
+clean_config_root=""
+clean_state_root=""
+if [ "$clean_install" -eq 1 ]; then
+  [ "${HERDR_ENV:-}" != "1" ] || \
+    die "--clean-install cannot run inside Herdr; use an ordinary terminal"
+  [ -z "${HERDR_CONFIG_PATH:-}" ] || \
+    die "--clean-install refuses external HERDR_CONFIG_PATH; unset it and rerun"
+
+  if [ "$profile" = "debug" ]; then
+    clean_app_name="herdr-dev"
+  else
+    clean_app_name="herdr"
+  fi
+  if [ "${XDG_CONFIG_HOME+x}" = "x" ]; then
+    clean_config_home="$XDG_CONFIG_HOME"
+  else
+    clean_config_home="$HOME/.config"
+  fi
+  if [ "${XDG_STATE_HOME+x}" = "x" ]; then
+    clean_state_home="$XDG_STATE_HOME"
+  else
+    clean_state_home="$HOME/.local/state"
+  fi
+  [ -n "$clean_config_home" ] && [ "${clean_config_home#/}" != "$clean_config_home" ] || \
+    die "clean-install config home must be a non-empty absolute path"
+  [ -n "$clean_state_home" ] && [ "${clean_state_home#/}" != "$clean_state_home" ] || \
+    die "clean-install state home must be a non-empty absolute path"
+  while [ "$clean_config_home" != "/" ] && [[ "$clean_config_home" == */ ]]; do
+    clean_config_home="${clean_config_home%/}"
+  done
+  while [ "$clean_state_home" != "/" ] && [[ "$clean_state_home" == */ ]]; do
+    clean_state_home="${clean_state_home%/}"
+  done
+  clean_config_root="$clean_config_home/$clean_app_name"
+  clean_state_root="$clean_state_home/$clean_app_name"
+
+  validate_clean_root() {
+    local root="$1"
+    case "$root" in
+      /*) ;;
+      *) die "clean-install root is not absolute: $root" ;;
+    esac
+    case "$root" in
+      /|*/../*|*/./*|*/..|*/.) die "refusing unsafe clean-install root: $root" ;;
+    esac
+    [ "${root##*/}" = "$clean_app_name" ] || \
+      die "refusing unexpected clean-install root: $root"
+    [ "$root" != "$HOME" ] && [ "$root" != "$script_dir" ] && [ "$root" != "$bin_dir" ] || \
+      die "refusing unsafe clean-install root: $root"
+    [ ! -L "$root" ] || die "clean-install root must not be a symlink: $root"
+  }
+  validate_clean_root "$clean_config_root"
+  validate_clean_root "$clean_state_root"
+  if [ "$clean_config_root" != "$clean_state_root" ]; then
+    case "$clean_config_root/" in
+      "$clean_state_root/"*) die "clean-install config and state roots must not overlap" ;;
+    esac
+    case "$clean_state_root/" in
+      "$clean_config_root/"*) die "clean-install config and state roots must not overlap" ;;
+    esac
+  fi
+
+  cat >&2 <<WARNING
+WARNING: --clean-install permanently resets the selected Herdr profile.
+  binary: $bin_dir/herdr
+  config: $clean_config_root
+  state:  $clean_state_root
+This removes all sessions, settings, Herdr-owned plugin data, and remote recovery
+tickets. Deleting tickets can strand hidden remote processes. External agent,
+MCP, SSH, project, and build-cache data is not removed.
+WARNING
+fi
 
 os_name="$(uname -s 2>/dev/null)" || die "could not determine the operating system with uname -s"
 arch_name="$(uname -m 2>/dev/null)" || die "could not determine the CPU architecture with uname -m"
@@ -259,11 +341,40 @@ built="$cargo_target_dir/$profile/herdr"
 [ -x "$built" ] || die "build did not produce $built"
 mkdir -p "$bin_dir"
 [ ! -d "$bin_dir/herdr" ] || die "install destination is a directory: $bin_dir/herdr"
+if [ "$clean_install" -eq 1 ]; then
+  [ ! -L "$bin_dir/herdr" ] || die "clean-install destination must not be a symlink: $bin_dir/herdr"
+  if [ -e "$bin_dir/herdr" ] && [ ! -f "$bin_dir/herdr" ]; then
+    die "clean-install destination is not a regular file: $bin_dir/herdr"
+  fi
+fi
 
 tmp=""
+clean_lock=""
+reset_committed=0
+quarantine_originals=()
+quarantine_paths=()
+rollback_quarantines() {
+  local index
+  index=$((${#quarantine_paths[@]} - 1))
+  while [ "$index" -ge 0 ]; do
+    if [ -e "${quarantine_paths[$index]}" ] || [ -L "${quarantine_paths[$index]}" ]; then
+      if [ ! -e "${quarantine_originals[$index]}" ] && [ ! -L "${quarantine_originals[$index]}" ]; then
+        mv "${quarantine_paths[$index]}" "${quarantine_originals[$index]}" || \
+          printf 'error: could not restore clean-install quarantine %s\n' "${quarantine_paths[$index]}" >&2
+      fi
+    fi
+    index=$((index - 1))
+  done
+}
 cleanup_tmp() {
+  if [ "$reset_committed" -eq 0 ] && [ "${#quarantine_paths[@]}" -gt 0 ]; then
+    rollback_quarantines
+  fi
   if [ -n "$tmp" ] && [ -e "$tmp" ]; then
     rm -f "$tmp"
+  fi
+  if [ -n "$clean_lock" ]; then
+    rmdir "$clean_lock" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup_tmp EXIT
@@ -274,11 +385,78 @@ if ! tmp="$(mktemp "$bin_dir/.herdr.tmp.XXXXXX")"; then
 fi
 cp "$built" "$tmp"
 chmod 755 "$tmp"
+
+if [ "$clean_install" -eq 1 ]; then
+  clean_lock="$bin_dir/.herdr-clean-install.lock"
+  mkdir "$clean_lock" || die "another clean install is already running: $clean_lock"
+
+  server_sockets=()
+  add_server_socket() {
+    local candidate="$1"
+    local existing
+    [ -S "$candidate" ] || return 0
+    for existing in "${server_sockets[@]}"; do
+      [ "$existing" != "$candidate" ] || return 0
+    done
+    server_sockets+=("$candidate")
+  }
+  add_server_socket "$clean_config_root/herdr.sock"
+  for socket_path in "$clean_config_root"/sessions/*/herdr.sock; do
+    add_server_socket "$socket_path"
+  done
+  if [ -n "${HERDR_SOCKET_PATH:-}" ]; then
+    case "$HERDR_SOCKET_PATH" in
+      /*) add_server_socket "$HERDR_SOCKET_PATH" ;;
+      *) add_server_socket "$script_dir/$HERDR_SOCKET_PATH" ;;
+    esac
+  fi
+
+  if [ "${#server_sockets[@]}" -gt 0 ] && [ ! -x "$bin_dir/herdr" ]; then
+    die "running Herdr servers were found but the installed binary cannot stop them: $bin_dir/herdr"
+  fi
+  for socket_path in "${server_sockets[@]}"; do
+    printf 'stopping Herdr server at %s\n' "$socket_path"
+    if ! env -u HERDR_ENV -u HERDR_SESSION -u HERDR_CLIENT_SOCKET_PATH \
+      HERDR_SOCKET_PATH="$socket_path" "$bin_dir/herdr" server stop; then
+      die "could not stop the Herdr server at $socket_path; clean install aborted"
+    fi
+    [ ! -S "$socket_path" ] || \
+      die "Herdr server socket remained after stop: $socket_path"
+  done
+
+  clean_roots=("$clean_config_root")
+  if [ "$clean_state_root" != "$clean_config_root" ]; then
+    clean_roots+=("$clean_state_root")
+  fi
+  for clean_root in "${clean_roots[@]}"; do
+    [ ! -L "$clean_root" ] || die "clean-install root became a symlink: $clean_root"
+    if [ -e "$clean_root" ]; then
+      quarantine="$clean_root.clean-install.$$.quarantine"
+      [ ! -e "$quarantine" ] && [ ! -L "$quarantine" ] || \
+        die "clean-install quarantine already exists: $quarantine"
+      mv "$clean_root" "$quarantine" || die "could not quarantine $clean_root"
+      quarantine_originals+=("$clean_root")
+      quarantine_paths+=("$quarantine")
+    fi
+  done
+fi
+
 if ! mv -f "$tmp" "$bin_dir/herdr"; then
   die "could not atomically replace $bin_dir/herdr"
 fi
 tmp=""
+reset_committed=1
+
+for quarantine in "${quarantine_paths[@]}"; do
+  if ! rm -rf -- "$quarantine"; then
+    die "installed Herdr, but could not remove reset data quarantined at $quarantine"
+  fi
+done
 trap - EXIT HUP INT TERM
+if [ -n "$clean_lock" ]; then
+  rmdir "$clean_lock" >/dev/null 2>&1 || true
+  clean_lock=""
+fi
 
 printf 'installed Herdr to %s/herdr\n' "$bin_dir"
 case ":$PATH:" in
@@ -288,6 +466,8 @@ esac
 cat <<'NOTE'
 note: source upgrades require rerunning this script; restart or hand off any
 already-running Herdr server to use the newly installed binary.
+note: --clean-install resets only the selected release or debug Herdr profile;
+external agent and MCP configuration remains separate and is not removed.
 note: agent integrations remain separate; install one explicitly with:
   herdr integration install <agent>
 NOTE

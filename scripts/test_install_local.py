@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import tempfile
 import textwrap
@@ -129,6 +130,11 @@ class InstallLocalTests(unittest.TestCase):
             "CARGO_BUILD_TARGET",
             "CARGO_TARGET_DIR",
             "CC",
+            "HERDR_CLIENT_SOCKET_PATH",
+            "HERDR_CONFIG_PATH",
+            "HERDR_ENV",
+            "HERDR_SESSION",
+            "HERDR_SOCKET_PATH",
             "PREFIX",
             "XDG_CACHE_HOME",
             "ZIG",
@@ -154,6 +160,38 @@ class InstallLocalTests(unittest.TestCase):
         path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
         path.chmod(0o755)
         return path
+
+    def write_installed_herdr(self, bin_dir: Path) -> Path:
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        path = bin_dir / "herdr"
+        path.write_text(
+            textwrap.dedent(
+                r"""
+                #!/bin/sh
+                set -eu
+                printf '%s\t%s\n' "${HERDR_SOCKET_PATH:-}" "$*" >> "$FAKE_HERDR_LOG"
+                status="${FAKE_INSTALLED_HERDR_EXIT:-0}"
+                if [ "$status" -ne 0 ]; then
+                  exit "$status"
+                fi
+                if [ "${1:-}" = "server" ] && [ "${2:-}" = "stop" ]; then
+                  rm -f "${HERDR_SOCKET_PATH:?}"
+                fi
+                exit 0
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        return path
+
+    def create_unix_socket_path(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        bound = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            bound.bind(str(path))
+        finally:
+            bound.close()
 
     def run_installer(
         self, *args: str, extra_env: dict[str, str] | None = None
@@ -259,6 +297,172 @@ class InstallLocalTests(unittest.TestCase):
             "build --locked",
         )
         self.assertTrue((self.default_target_dir() / "debug" / "herdr").exists())
+
+    def test_clean_release_install_stops_servers_and_resets_release_data(self) -> None:
+        bin_dir = self.root / "clean-bin"
+        self.write_installed_herdr(bin_dir)
+        config_home = self.home / ".config"
+        state_home = self.home / ".local" / "state"
+        sockets = (
+            config_home / "herdr" / "herdr.sock",
+            config_home / "herdr" / "sessions" / "work" / "herdr.sock",
+        )
+        for socket_path in sockets:
+            self.create_unix_socket_path(socket_path)
+        ticket = state_home / "herdr" / "remote-resume" / "v2" / "ticket.json"
+        ticket.parent.mkdir(parents=True)
+        ticket.write_text("ticket", encoding="utf-8")
+        dev_config = config_home / "herdr-dev" / "config.toml"
+        dev_config.parent.mkdir(parents=True)
+        dev_config.write_text("dev", encoding="utf-8")
+        dev_state = state_home / "herdr-dev" / "keep"
+        dev_state.parent.mkdir(parents=True)
+        dev_state.write_text("dev", encoding="utf-8")
+        external_config = self.home / ".codex" / "config.toml"
+        external_config.parent.mkdir()
+        external_config.write_text("external", encoding="utf-8")
+
+        result = self.run_installer(
+            "--clean-install",
+            "--bin-dir",
+            str(bin_dir),
+            extra_env={"FAKE_BINARY_CONTENT": "clean binary"},
+        )
+
+        self.assert_success(result)
+        self.assertEqual((bin_dir / "herdr").read_text(encoding="utf-8"), "clean binary")
+        stop_lines = self.herdr_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(stop_lines), len(sockets))
+        self.assertTrue(all(line.endswith("\tserver stop") for line in stop_lines))
+        self.assertFalse((config_home / "herdr").exists())
+        self.assertFalse((state_home / "herdr").exists())
+        self.assertEqual(dev_config.read_text(encoding="utf-8"), "dev")
+        self.assertEqual(dev_state.read_text(encoding="utf-8"), "dev")
+        self.assertEqual(external_config.read_text(encoding="utf-8"), "external")
+        self.assertEqual(list(bin_dir.glob(".herdr.tmp.*")), [])
+
+    def test_clean_debug_install_resets_only_debug_data(self) -> None:
+        bin_dir = self.root / "clean-debug-bin"
+        self.write_installed_herdr(bin_dir)
+        stable = self.home / ".config" / "herdr" / "config.toml"
+        stable.parent.mkdir(parents=True)
+        stable.write_text("stable", encoding="utf-8")
+        dev = self.home / ".config" / "herdr-dev" / "config.toml"
+        dev.parent.mkdir(parents=True)
+        dev.write_text("dev", encoding="utf-8")
+        dev_ticket = self.home / ".local" / "state" / "herdr-dev" / "remote-resume" / "ticket"
+        dev_ticket.parent.mkdir(parents=True)
+        dev_ticket.write_text("ticket", encoding="utf-8")
+
+        result = self.run_installer(
+            "--debug", "--clean-install", "--bin-dir", str(bin_dir)
+        )
+
+        self.assert_success(result)
+        self.assertEqual(stable.read_text(encoding="utf-8"), "stable")
+        self.assertFalse(dev.parent.exists())
+        self.assertFalse((self.home / ".local" / "state" / "herdr-dev").exists())
+
+    def test_clean_install_stop_failure_preserves_binary_and_data(self) -> None:
+        bin_dir = self.root / "clean-stop-failure-bin"
+        installed = self.write_installed_herdr(bin_dir)
+        original = installed.read_text(encoding="utf-8")
+        config_dir = self.home / ".config" / "herdr"
+        self.create_unix_socket_path(config_dir / "herdr.sock")
+        ticket = self.home / ".local" / "state" / "herdr" / "remote-resume" / "ticket"
+        ticket.parent.mkdir(parents=True)
+        ticket.write_text("ticket", encoding="utf-8")
+
+        result = self.run_installer(
+            "--clean-install",
+            "--bin-dir",
+            str(bin_dir),
+            extra_env={"FAKE_INSTALLED_HERDR_EXIT": "23"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not stop the Herdr server", result.stderr)
+        self.assertEqual(installed.read_text(encoding="utf-8"), original)
+        self.assertTrue(config_dir.exists())
+        self.assertTrue(ticket.exists())
+        self.assertEqual(list(bin_dir.glob(".herdr.tmp.*")), [])
+
+    def test_clean_install_replace_failure_restores_quarantined_data(self) -> None:
+        bin_dir = self.root / "clean-replace-failure-bin"
+        installed = self.write_installed_herdr(bin_dir)
+        original_binary = installed.read_bytes()
+        config = self.home / ".config" / "herdr" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text("original config", encoding="utf-8")
+        ticket = (
+            self.home
+            / ".local"
+            / "state"
+            / "herdr"
+            / "remote-resume"
+            / "ticket.json"
+        )
+        ticket.parent.mkdir(parents=True)
+        ticket.write_text("original ticket", encoding="utf-8")
+
+        real_mv = shutil.which("mv", path=os.environ.get("PATH"))
+        if real_mv is None:
+            self.fail("mv is required to test clean-install rollback")
+        self.write_tool(
+            "mv",
+            f"""
+            #!/bin/sh
+            destination=
+            for argument in "$@"; do
+              destination=$argument
+            done
+            if [ "$destination" = "${{FAKE_MV_FAIL_DEST:-}}" ]; then
+              exit 71
+            fi
+            exec {shlex.quote(real_mv)} "$@"
+            """,
+        )
+
+        result = self.run_installer(
+            "--clean-install",
+            "--bin-dir",
+            str(bin_dir),
+            extra_env={
+                "FAKE_BINARY_CONTENT": "replacement binary",
+                "FAKE_MV_FAIL_DEST": str(installed),
+            },
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not atomically replace", result.stderr)
+        self.assertEqual(installed.read_bytes(), original_binary)
+        self.assertEqual(config.read_text(encoding="utf-8"), "original config")
+        self.assertEqual(ticket.read_text(encoding="utf-8"), "original ticket")
+        self.assertEqual(
+            list(config.parent.parent.glob("herdr.clean-install.*.quarantine")), []
+        )
+        self.assertEqual(
+            list(ticket.parents[2].glob("herdr.clean-install.*.quarantine")), []
+        )
+        self.assertEqual(list(bin_dir.glob(".herdr.tmp.*")), [])
+        self.assertFalse((bin_dir / ".herdr-clean-install.lock").exists())
+
+    def test_clean_install_check_and_runtime_guards_are_read_only(self) -> None:
+        for args, extra_env, expected in (
+            (("--check", "--clean-install"), {}, "cannot be combined"),
+            (("--clean-install",), {"HERDR_ENV": "1"}, "ordinary terminal"),
+            (
+                ("--clean-install",),
+                {"HERDR_CONFIG_PATH": str(self.root / "external.toml")},
+                "refuses external HERDR_CONFIG_PATH",
+            ),
+        ):
+            with self.subTest(args=args, expected=expected):
+                result = self.run_installer(*args, extra_env=extra_env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+        self.assertFalse(self.cargo_log.exists())
+        self.assertFalse(self.herdr_log.exists())
 
     def test_default_build_cache_ignores_checkout_target_artifacts(self) -> None:
         stale = self.checkout / "target" / "release" / "herdr"

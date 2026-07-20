@@ -77,11 +77,12 @@ nix flake update herdr
 ```bash
 ./install-local.sh --check
 ./install-local.sh
+./install-local.sh --clean-install
 ```
 
 脚本支持 x86_64 和 aarch64 的 Linux 与 macOS。它需要 Bash、可用的 `cargo` 与 `rustc`、严格为 `0.15.2` 的 Zig,以及可工作的 C 编译器/链接器。设置了 `CC` 时使用它,否则依次寻找 `cc`、`clang`、`gcc`。脚本会分别报告缺失或不可用的工具,但不会替你调用包管理器。所需 Zig 不在默认 `PATH` 时可设置 `ZIG=/path/to/zig`。安装器只安装当前 checkout 的原生二进制,因此拒绝 Cargo 跨目标构建。
 
-`--check` 会检查 Cargo 与 Rust 版本、编译并链接最小 C 程序、验证精确 Zig 版本,并在不构建 Herdr 的情况下报告平台、Zig 路径、隔离的构建缓存和安装目标。默认执行锁定的 release 构建,再原子替换 `$HOME/.local/bin/herdr`。构建产物按 checkout 路径隔离在 `${XDG_CACHE_HOME:-$HOME/.cache}/herdr/install-local` 下,避免其他 checkout 或 Docker bind mount 留下的本地库路径污染构建;显式 `CARGO_TARGET_DIR` 会覆盖它。用 `--prefix DIR` 或 `PREFIX` 改安装前缀,用 `--bin-dir DIR` 直接指定二进制目录,用 `--debug` 构建 debug 版本。目标不在 `PATH` 时脚本会警告;直接 SSH federation 仍会发现默认的 `~/.local/bin/herdr`。
+`--check` 会检查 Cargo 与 Rust 版本、编译并链接最小 C 程序、验证精确 Zig 版本,并在不构建 Herdr 的情况下报告平台、Zig 路径、隔离的构建缓存和安装目标。默认执行锁定的 release 构建,再原子替换 `$HOME/.local/bin/herdr`。构建产物按 checkout 路径隔离在 `${XDG_CACHE_HOME:-$HOME/.cache}/herdr/install-local` 下,避免其他 checkout 或 Docker bind mount 留下的本地库路径污染构建;显式 `CARGO_TARGET_DIR` 会覆盖它。用 `--prefix DIR` 或 `PREFIX` 改安装前缀,用 `--bin-dir DIR` 直接指定二进制目录,用 `--debug` 构建 debug 版本。`--clean-install` 是仅针对所选 profile 的显式破坏性 factory reset,该 flag 本身即授权 reset:release 清理 `herdr`,`--debug` 清理 `herdr-dev`。它会先 stage candidate,再停止检测到的 default 与 named-session server,quarantine 并删除该 profile 的 config/state tree(包括全部 session 与 remote recovery ticket),最后安装 candidate。由于停止 owning server 会中断安装,脚本拒绝从 Herdr 内运行。删除 recovery ticket 可能留下 hidden remote process。外部 agent/MCP/SSH 配置、project、另一 profile 与 build cache 都不会被删除。目标不在 `PATH` 时脚本会警告;直接 SSH federation 仍会发现默认的 `~/.local/bin/herdr`。
 
 升级源码安装时,更新 checkout 后重新运行脚本。替换文件不会替换已经运行的 Herdr 服务器进程;要让会话使用新构建,需重启或执行受支持的 live handoff。智能体集成是独立内容,`install-local.sh` 不会安装或升级它们。
 

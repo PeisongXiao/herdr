@@ -8,7 +8,7 @@
 - Added cursor-only `herdr remote-handoff` to move the currently delegated pane into a new workspace on its actual host before the managed attach ends. Nested managed SSH carries a single presentation owner through every hop, handoff applies to the innermost pane, and `herdr agent attach peer::target --takeover` is required to replace an existing owner rather than duplicate a pane. Intermediate takeover and handoff are rejected while that pane owns or is preparing a deeper remote presentation so ownership routes cannot become stale. Concurrent links to the same peer transfer reverse registration without unregistering surviving presentations.
 - Managed SSH now preserves the local owner pane when a prepared final attach is rejected, cleans up pre-commit remote shells and agent claims, mirrors delegated agent state back to the presentation owner, and warns before server stop terminates active remote presentations.
 - Added runtime-scoped Herdr peer links plus `herdr peer list`, `herdr peer health`, and `herdr peer unregister`. The reverse link exposes metadata operations (`list` and `get`) plus an id-and-epoch-only presentation-activation acknowledgement, so an SSH destination cannot read origin terminals or detection previews, inject input, or launch origin processes; the private client transport and full JSON API socket are never forwarded. Its restricted Unix endpoint has a compact opaque, per-process name in the API directory when possible and a compact temporary fallback when required by socket path limits. Incoming reverse registrations expire after 15 seconds without a successful metadata refresh, removing ghost peers after origin crashes or network loss. Plain SSH bridges also close on logout or an expired wrapper lease, peer-agent presentation leases close with their owner panes without consuming the shared metadata bridge, and concurrent connections are owned independently. Every bridge conditionally unregisters only its own remote registration; detached cleanup continues to block server live handoff until it finishes. Bidirectional awareness requires SSH daemon policy and any applicable authorized-key policy to permit remote Unix-socket forwarding, and denials retain the actionable diagnostic.
-- Added `install-local.sh` for locked source builds on Linux and macOS x86_64/aarch64. It verifies that Cargo, Rust, and the selected C compiler/linker are usable, requires exactly Zig 0.15.2, supports destination/check/debug options, atomically replaces the installed binary, and leaves running servers on their existing process until they are restarted or handed off.
+- Added `install-local.sh` for locked source builds on Linux and macOS x86_64/aarch64. It verifies that Cargo, Rust, and the selected C compiler/linker are usable, requires exactly Zig 0.15.2, supports destination/check/debug options, and atomically replaces the installed binary. Its explicit `--clean-install` factory-reset mode stages the new build, stops all detected sessions in the selected release or debug profile, and removes that profile's configuration, state, sessions, and recovery tickets before installation; external agent and MCP configuration remains untouched.
 - The hidden desktop MCP bridge (`herdr mcp serve`) and its durable message queue (`herdr desktop enqueue`) are now available on Linux in addition to macOS, and any MCP-capable coding agent can register the STDIO bridge, not just Codex desktop. Existing configurations remain restricted to the same ten tools, while explicit `--full-control` mode adds typed human-equivalent control over shared session and runtime operations without creating a Herdr session, pane, or agent. A gray, green, or peach MCP marker now shows disconnected, restricted, or full-control bridge presence in the sidebar and mobile header.
 - Added `[remote] auto_remote_handoff` for automatic remote-pane survival across local server stops. With the setting enabled, a graceful server stop hands every delegated remote pane back to its host instead of terminating it, persisting one resume record per pane; the next server start re-acquires each pane into its recorded workspace and tab in the background. Automatic re-acquire needs non-interactive (key or agent) SSH authentication; password or MFA hosts stay pending and can be resumed with the new `herdr remote-resume [--list] [--peer PEER_ID]` command, which authenticates interactively. Ungraceful stops and nested SSH chains deeper than one hop keep the destructive stop contract.
 
@@ -23,7 +23,6 @@
 ## [0.7.3] - 2026-07-08
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - The session navigator now keeps the active search query when leaving and re-entering search focus, and its footer now shows shortcuts for the current input mode. (#1115, #1140, thanks @liby)
 - Re-focusing an already-focused done agent or pane through the socket API now marks it seen instead of leaving stale done status in API responses.
 - Windows foreground-process detection now ignores cyclic process-parent snapshots instead of growing memory until the server aborts. (#1083)
@@ -52,7 +51,6 @@
 - Nix packaging now uses `xcbuild` instead of custom Apple SDK wrappers for Darwin builds. (#995, thanks @arunoruto)
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Windows clients now send shifted punctuation such as `!`, `?`, and `:` as literal text to Kitty-keyboard-mode pane apps, fixing Kiro CLI TUI prompts while preserving modified key chords. (#1066, #1105)
 - Alt-Shift letter chords are now preserved instead of being collapsed into plain uppercase input. (#1088)
 - Antigravity background-task waits are now detected even when the UI does not show a `/tasks` hint. (#755)
@@ -108,7 +106,6 @@
 - OMP, OpenCode, Pi, Devin, and other official hook integrations now scope lifecycle and session reports to the intended root agent process more reliably, reducing stale or cross-process session adoption after restarts, nested commands, and new sessions. (#614, #712, #719, #765)
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Windows Terminal multiline text paste now reaches pane apps as one bracketed paste, so OMP, Pi, and similar prompts no longer submit each pasted line separately. Plain Esc, Shift+Enter, mouse, focus, resize, and Unicode paste handling are preserved on the Windows client path. (#670)
 - Local Herdr clients no longer treat raw `Ctrl+V` as a clipboard-image paste trigger, so pane apps such as Vim and Neovim receive block-visual `Ctrl+V` even when the desktop clipboard contains an image. `herdr --remote` keeps `keys.remote_image_paste = "ctrl+v"` by default. (#647)
 - Herdr now refreshes cached host terminal colors when terminals report a light/dark color-scheme change, so pane apps that query OSC 10/11 no longer need detach/attach to see updated default colors. Opt-in `[theme].auto_switch` can also switch Herdr's own UI between configured `dark_name` and `light_name` themes. (#675)
@@ -145,7 +142,6 @@
 - Public workspace, tab, and pane ids are now short stable handles such as `w1`, `w1:t1`, and `w1:p1`; closed tab and pane ids no longer retarget later resources. (#569)
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - `pane.send_keys` and `pane.send_input.keys` now accept Herdr key-combo strings such as `ctrl+h`, `ctrl+j`, `ctrl+k`, and `ctrl+l`. (#613, thanks @dmmulroy)
 - Config startup and reload now warn about unknown top-level table sections, including a `[toast]` hint that points to `[ui.toast]`, instead of silently ignoring them.
 - Claude Code session restore now accepts real `/clear`, `/resume`, and compacted session identity changes while still ignoring nested `claude -p` startup sessions that inherit the pane environment. (#620)
@@ -163,13 +159,11 @@
 This is a hotfix release for v0.6.9. See the v0.6.9 notes for the full feature release.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Lifecycle-authority agent integrations such as Pi and OpenCode no longer trigger a repeated detection reset loop that could flood logs, drive high CPU, and make the UI lag or stop responding. (#560, #565, thanks @dzevs)
 
 ## [0.6.9] - 2026-06-10
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Copy mode page scrolling now stops at the same top and bottom boundaries as normal pane scrolling instead of overshooting or getting stuck near the edges. (#459, #460, thanks @reobin)
 - Clipboard-copy feedback no longer stays visible after the related selection state has gone stale. (#443)
 - The session navigator now uses live workspace labels, so renamed workspaces and cwd-derived labels stay current while navigating. (#377)
@@ -211,7 +205,6 @@ This is a hotfix release for v0.6.9. See the v0.6.9 notes for the full feature r
 This is a hotfix release for v0.6.7, prioritizing a server-crash fix for panes that print complex Unicode or emoji output.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Fixed a Herdr server crash triggered by pane output containing complex Unicode, emoji, or decomposed accent graphemes. Affected sessions could lose running pane processes or crash again after restore if the same saved pane output was replayed. (#453)
 - Direct installs managed by mise now update through the mise install path instead of failing to replace the active binary.
 - Claude Code panes that are actively thinking or streaming no longer flicker to blocked because of custom status text. (#409)
@@ -236,7 +229,6 @@ This is a hotfix release for v0.6.7, prioritizing a server-crash fix for panes t
 - Claude Code, Codex, GitHub Copilot CLI, Droid, Kimi Code CLI, and Qoder CLI integrations now report session identity only. Native state for those agents comes from Herdr's screen detection, while Pi, OMP, OpenCode, Kilo Code CLI, Hermes Agent, and custom socket integrations can still report state.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Large long-running sessions no longer hit the frame-streaming crash fixed by the vendored libghostty-vt update. (#276)
 - Copy mode now preserves linewise selection after `shift+v` while moving the cursor. (#360, #389, thanks @reobin)
 - Leaving copy mode now restores the previous scroll position, or returns to the bottom when copy mode started at the bottom. (#398, #410, thanks @reobin)
@@ -265,7 +257,6 @@ This is a hotfix release for v0.6.7, prioritizing a server-crash fix for panes t
 - Custom command keybindings now accept an optional `description` field to provide user-defined descriptions shown in the keybind help panel instead of the default `'custom command'` label. (#362)
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - The OpenCode integration no longer treats `session.created` or `session.updated` plugin events as idle signals, so active sessions stay marked working until OpenCode reports `session.status` or `session.idle`. (#351)
 - New interactive panes now use login-shell startup on macOS by default so Homebrew and other login PATH setup is available, with `terminal.shell_mode = "non_login"` as an opt-out. (#350)
 - Claude Code panes no longer stay blocked after stale permission-prompt reports when the visible screen has returned to idle or working state. (#349)
@@ -284,7 +275,6 @@ This is a hotfix release for v0.6.7, prioritizing a server-crash fix for panes t
 - Added read-only `agent_session` metadata to pane and agent API/CLI responses when official integrations report native session references.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Live handoff now preserves terminal state when transferring supported running panes to a replacement server.
 - WSL clipboard writes now prefer OSC 52 before WSLg clipboard tools, so mouse selection and double-click copy populate Windows clipboard history in Windows Terminal. (#333)
 - Incomplete host terminal OSC default-color replies no longer get misread as Alt-key input and forwarded into panes, preventing interactive prompts such as `gh auth login --web` from aborting on split `ESC ]` input. (#279, #306, #344)
@@ -296,7 +286,6 @@ This is a hotfix release for v0.6.7, prioritizing a server-crash fix for panes t
 ## [0.6.4] - 2026-05-27
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Fixed macOS server startup with large restored sessions by raising the server file descriptor soft limit, preventing new panes from failing with `dup of fd N failed` or `Too many open files` around 40 live panes. (#327)
 
 This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
@@ -319,7 +308,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Added Qoder CLI detection, terminal state heuristics, and `herdr integration install qodercli` hook support. (#308, #309, thanks @wayneleelwc)
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Remote bootstrap now downloads exact-version release assets for Homebrew and Nix clients instead of copying package-manager-managed local binaries into `~/.local/bin/herdr`.
 - `website/latest.json` now stores asset URLs for archived releases under `releases[version].assets`, so remote bootstrap can fetch the current client version even when Homebrew and the top-level latest release are temporarily out of sync.
 - App and server event queues no longer stall under load, improving delivery of pane and agent state updates. (#265)
@@ -339,7 +327,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Added CLI and socket API support for Git worktrees with `herdr worktree list/create/open/remove`, optional worktree provenance on workspace responses, and client/server protocol version 10.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - GitHub Copilot CLI sessions now use tested terminal heuristics for approval prompts, freeform input, plan review, and thinking states in the Agents panel. (#232, #256, thanks @LaneBirmingham)
 - Kiro approval prompts are now detected as blocked in the Agents panel. (#255)
 - Workspace labels now follow the live pane working directory after directory changes.
@@ -355,7 +342,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Added named-session reattach and stop command hints so detach and update guidance point back to the active session. (#199, thanks @Golden-Pigeon)
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Pane apps that query OSC 10/11 default foreground/background colors now receive the host terminal colors, so OpenCode and similar TUIs can detect light terminal themes inside Herdr. (#253)
 - Codex Plan mode question prompts now override stale integration `working` reports when the visible terminal UI is clearly waiting for an answer, stale hook authority is cleared when foreground process detection sees Codex exit back to the shell, and Claude Code cancellations now recover from stale hook `working` reports when the idle prompt returns. (#249)
 - Keybinding parsing now accepts non-ASCII printable keys such as `ö`, `é`, and `ğ`, including UTF-8 Alt chords. (#247)
@@ -377,7 +363,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Added native Kiro CLI detection with idle and working state heuristics. (#185)
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Keybinding conflict warnings now stay visible and show one readable yellow row per conflicting binding.
 - Update prompts that need to stop a running server now default Enter to yes and show `[Y/n]`.
 - Pending release notes no longer open automatically on startup; the latest notes remain available from the menu.
@@ -396,7 +381,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 ## [0.5.12] - 2026-05-19
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - The Claude Code integration no longer reports successful or failed post-tool hooks as `working`, and installing the updated integration removes Herdr's deprecated post-tool hook entries from existing Claude settings. (#198)
 - The Codex integration now reports native `PermissionRequest` hooks as `blocked`, so permission prompts no longer stay pinned as `working` after a tool-use hook. (#198)
 - Workspace and tab rename prompts now handle Backspace, Ctrl+Backspace, Alt+Backspace, Cmd+Backspace, Ctrl+H, Ctrl+W, and Ctrl+U as editing shortcuts instead of inserting stray characters or clearing unexpectedly. (#204)
@@ -410,7 +394,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Added `ui.sidebar_min_width` and `ui.sidebar_max_width` to configure the sidebar's expanded resize bounds. Defaults remain 18 and 36 columns; existing configs are unchanged. (#132, #135, thanks @ChihGodlee)
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Running the internal `herdr client` command from inside Herdr now respects the nested-launch guard, and the command is no longer advertised in root help. (#187)
 - The Herdr agent skill now refuses to claim pane ownership unless it is running inside Herdr. (#152)
 - Terminal-style docs code blocks now keep their copy button in the top-right corner. (#190)
@@ -440,7 +423,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Renamed the focused pane fullscreen keybinding to `keys.zoom`; `keys.fullscreen` remains supported as a legacy alias.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Grok Build is now detected as `grok`, with basic working, blocked, and idle state detection. Conflicting known-agent hook labels are ignored once native foreground-process detection identifies a different known agent. (#133)
 - Terminal cursor shapes now forward through attached clients. (#116)
 - Herdr now redraws immediately when the outer terminal regains focus.
@@ -462,7 +444,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Moved experimental settings into `[experimental]`.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - PageUp and PageDown now scroll Herdr pane scrollback for normal panes while still forwarding keys to full-screen or mouse-reporting apps.
 - Enhanced tilde key sequences now parse correctly, improving compatibility with terminals that emit them.
 - `herdr integration install codex` now enables the current Codex `[features] hooks = true` flag and migrates the deprecated top-level `codex_hooks` flag.
@@ -484,7 +465,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Scrolling over the tab bar now switches tabs directly, including overflowing tab bars.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Indexed terminal palette colors now render correctly for 256-color terminal apps.
 - Hook-based agent integrations now reject stale out-of-order reports and base notifications on effective agent state, reducing duplicate or stuck state changes.
 - Background tabs now resize when the outer terminal size changes, preventing stale pane dimensions when switching back to them.
@@ -505,7 +485,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - The agents panel now highlights the currently focused agent entry, matching the active workspace styling. (#84, thanks @soomtong)
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Git branch and ahead/behind refreshes now run off the main loop, preventing slow Git status checks from freezing the UI.
 - Update and startup flows now detect incompatible running servers earlier and give clear stop/restart guidance instead of trying to attach with a mismatched client/server protocol.
 - `herdr update` now downloads and prepares the new binary before stopping a running server, reducing the chance of interrupting an active session when download or install preparation fails.
@@ -521,7 +500,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - CLI workspace, tab, and pane creation now preserve the current focus by default; pass `--focus` to switch to the newly created item.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - OSC 8 hyperlinks emitted inside panes now remain clickable after Herdr renders them, including titled markdown-style links.
 - Agent panel scope now defaults to `all` and is saved to config when changed, so choosing `current` or `all` survives session resets and upgrades.
 - Native agent hook state now clears when the detected native agent exits, preventing stale hook-reported status from sticking to a pane.
@@ -533,7 +511,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Added a mobile layout for narrow terminals, making it practical to SSH into your machine and run herdr from your phone.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Non-ASCII terminal input is no longer dropped when UTF-8 characters arrive split across multiple reads.
 - Native agent detection now clears agents after their foreground process exits and control returns to the shell, preventing stale agent status in the sidebar.
 - Pane contents no longer shift horizontally when scrollback appears, keeping the scrollbar gutter stable.
@@ -541,7 +518,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 ## [0.5.4] - 2026-05-03
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Visible active-tab panes that finish while the outer terminal is unfocused are now marked as seen when you return to herdr, preventing stale done/attention indicators.
 - IME candidate windows and mobile SSH cursor tracking now stay anchored to the focused pane during client redraws, including apps that hide the cursor, instead of drifting to sidebar or repaint positions.
 
@@ -555,7 +531,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Focused panes can now still alert you through terminal notifications when the herdr terminal window is unfocused, so active work does not go quiet just because you switched to another app.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Dragging pane split borders now works when the app inside the pane has mouse reporting enabled, including Claude Code no-flicker mode. (#61, thanks @EYH0602)
 - Pressing the prefix key twice now forwards a literal prefix key into the focused pane in client mode again.
 - `herdr integration install` and `herdr integration uninstall` now work without requiring a running herdr server.
@@ -567,7 +542,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Config can now be reloaded in the running app/server from the global menu or with `herdr server reload-config`, applying safe live settings without restarting the persistent server.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Persistent server startup now surfaces config diagnostics in attached clients instead of silently hiding parse or validation errors.
 - Pane backgrounds now stay transparent when the host terminal background color is unknown, while explicit terminal cell backgrounds still render correctly.
 - Persistent-session toast and sound notifications now target the foreground attached client instead of firing across every connected client.
@@ -584,7 +558,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Routine API request traces now log at debug level by default, making normal support logs smaller and easier to read while preserving detailed traces when debug logging is enabled.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Pasted text and other reverse-video terminal content now stays readable when pane backgrounds are transparent. (#45, thanks @EYH0602)
 - Panes now advertise a stable `TERM=xterm-256color` and `COLORTERM=truecolor` by default, improving redraw and cursor behavior in shells and remote sessions.
 - Pane scrollbars once again reserve their own rightmost column instead of overlaying terminal content in persistent session mode.
@@ -626,7 +599,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Pressing the prefix key twice now forwards a literal prefix keystroke into the focused pane, which makes nested tools and terminal apps that use the same prefix easier to control.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - App-level key handling now normalizes enhanced keyboard reporting consistently, so shifted bindings and text like `?` and uppercase characters work correctly in navigate mode and text-entry UI.
 - Ctrl+letter input is now encoded correctly when pane apps enable kitty keyboard mode, improving compatibility with terminal programs that expect CSI-u style key reporting.
 - The collapsed sidebar now keeps the active workspace visibly highlighted even while you stay in terminal mode.
@@ -635,7 +607,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 ## [0.4.9] - 2026-04-13
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Droid's primary-screen redraws no longer erase pane scrollback inside herdr, while normal scrollback-clear behavior is preserved elsewhere.
 - `q` is now dedicated to quitting in navigate mode instead of also acting as a generic cancel key in modals and overlays, reducing accidental quits.
 - Tab bar scrolling is tighter: the scroll-right button and new-tab button now sit directly adjacent to the last visible tab without a gap, and manual scroll no longer overscrolls past the last tab.
@@ -647,7 +618,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Ghostty-backed panes now preserve the host terminal’s default background when it matches the outer terminal theme, so terminal window transparency can show through pane content instead of being repainted as an opaque color.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Clipboard writes now prefer native platform clipboard tools (`pbcopy`, `wl-copy`, `xclip`, or `xsel`) before falling back to OSC 52, which makes copy operations from panes more reliable across terminal setups.
 
 ## [0.4.7] - 2026-04-10
@@ -657,7 +627,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - `workspace create` and `tab create` now return the created root pane in their JSON response, so automation can act on the new pane immediately without an extra lookup.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Background panes that start idle no longer show up as `done` or trigger finished-state attention until they have actually transitioned from working or blocked to idle.
 - Left-click now focuses panes and right-click now opens the pane context menu even when the inner TUI has mouse reporting enabled, fixing apps like Claude Code. (#25, thanks @othavioquiliao)
 - OSC 52 clipboard writes from apps running inside panes now reach the host clipboard correctly, including copy requests emitted by child processes inside the pane.
@@ -670,7 +639,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 ## [0.4.6] - 2026-04-09
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Agent state detection is now more reliable when panes are scrolled back, when Codex is running in narrow panes, and when Claude opens slash-command or settings menus, reducing false blocked or idle states.
 - Mouse-driven terminal text selection now autoscrolls into pane scrollback and clears cleanly after copy, so selecting beyond the visible viewport works as expected.
 - Pane terminal colors now return to the outer terminal theme after fullscreen TUIs exit, fixing cases like Droid leaving stale background colors behind. This restore path now also works correctly on macOS.
@@ -686,7 +654,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Session state is now saved automatically with a debounce while you work, so recent workspace, tab, pane, and sidebar changes are preserved more reliably even if herdr exits unexpectedly.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Only the focused pane now owns the terminal cursor, which removes stray cursor blocks from unfocused panes.
 - In-app **What's New** / release notes now render inline code spans and fenced code blocks correctly.
 - Default numbered tabs now stay auto-named when you keep or rename them back to their numeric label, so generated tab numbering stays compact and predictable.
@@ -697,7 +664,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - The expanded sidebar can now be split into resizable workspace and agent sections with a draggable divider, and that section sizing is preserved across restarts.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - IME input now works properly for Chinese and other UTF-8 input methods in pane terminals, so candidate selection no longer falls back to typing raw digit keys. (#9, thanks @Edmund-a7)
 - `herdr pane run ...` now uses the bracketed-paste-aware input path, improving compatibility with shells and terminal apps that expect pasted command text to arrive atomically.
 - The local socket API is more robust and secure: its Unix socket is now restricted to the current user, and long-running output waits and subscriptions stop cleanly on disconnect or shutdown instead of hanging indefinitely.
@@ -705,7 +671,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 ## [0.4.3] - 2026-04-07
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Update checks and in-app **What's New** release notes no longer depend on GitHub’s release API, which avoids the transient 403 failures from the previous update path.
 - `herdr pane run ...` now submits the full command atomically in one request, fixing cases where scripted commands did not reliably execute because the final Enter was sent separately.
 - Bare line-feed input is now preserved in raw terminal input instead of being normalized to Enter, fixing Linux terminal cases where inputs like Shift+Enter or Ctrl+J could be interpreted incorrectly.
@@ -722,7 +687,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Linux release binaries now ship with libghostty SIMD enabled again without reintroducing the musl startup issue, restoring the optimized Linux build path.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Typing in pane terminals on macOS is responsive again after the Ghostty migration, by keeping a persistent per-pane Ghostty key encoder instead of rebuilding it on every keypress.
 - The collapsed sidebar expand toggle works again.
 - Creating a new tab now waits until you confirm the dialog, so cancelling the new-tab flow no longer leaves behind an unwanted tab.
@@ -732,7 +696,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 ## [0.4.1] - 2026-04-06
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Fixed Linux release binaries crashing on startup.
 
 ## [0.4.0] - 2026-04-05
@@ -758,7 +721,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Release notes are now retained as the latest available notes after you dismiss the startup modal, so you can reopen them later from the UI instead of only seeing them once.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Fixed held-key repeat in terminal panes on macOS terminals that send explicit repeat events through the enhanced keyboard protocol, restoring continuous backspace, character, and arrow-key repeat without letting modal close/confirm key repeats leak into the shell.
 
 ## [0.3.1] - 2026-04-03
@@ -771,7 +733,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Debug builds now use separate runtime/config paths from normal releases, which avoids local development sessions colliding with your main herdr install.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Starting a second herdr instance against an active socket now fails fast with a clear error instead of clobbering the running session.
 - Fixed pane and agent state updates being dropped under internal event queue pressure, which could leave a pane showing stale status after work finished.
 - Fixed onboarding modal sizing and click targets, and corrected release-notes scroll calculations when a scrollbar is present.
@@ -804,7 +765,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 ## [0.2.4] - 2026-04-01
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Fixed a macOS-only startup misdetection where pi could briefly appear as codex in the sidebar because process environment entries were being parsed as command-line arguments.
 
 ## [0.2.3] - 2026-03-31
@@ -814,14 +774,12 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Pane scrollbars now only appear when herdr has real host scrollback for that pane, instead of implying a host-managed scroll position for app-owned scrolling.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Fixed Codex and pi panes becoming unscrollable in herdr by preserving recoverable host history for top-anchored normal-screen output, without relying on alternate-screen scrollback retention.
 - Fixed pane wheel routing so apps using mouse reporting or alternate-scroll behavior can receive scroll input directly instead of having herdr always intercept it.
 
 ## [0.2.2] - 2026-03-31
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Fixed pane scrollbars so they reserve their own lane instead of drawing over terminal content, which makes scrolling and scrollbar dragging behave more cleanly in narrow panes.
 - Fixed alternate-screen scrollback handling so full-screen terminal apps can preserve recoverable history inside herdr panes instead of losing rows that scroll off.
 - Fixed Codex in herdr panes losing transcript/history while running in alternate screen, so past output remains scrollable instead of disappearing as the session grows.
@@ -837,7 +795,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Rendering is now driven more directly by app events instead of relying as much on polling, which makes the UI feel snappier and cuts unnecessary redraw work.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Restored smooth fast spinner animation for working agents.
 - Closing a pane or workspace now reliably terminates the processes running inside that pane session instead of leaving shells or child processes behind.
 - Fixed bracketed paste handling so incomplete paste sequences are preserved across read timeouts instead of being dropped or misread.
@@ -858,7 +815,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Herdr now blocks nested launches by default when started inside a herdr-managed pane; set `advanced.allow_nested = true` to opt back in.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Improved terminal keyboard protocol parsing and input forwarding across terminal variants, including better handling for shifted printable keys.
 - Fixed Ghostty on macOS misparsing some arrow-key and modifier/enhanced key sequences.
 - Refined sidebar rollups and pane ordering so workspace status and agent lists stay more stable and predictable.
@@ -894,7 +850,6 @@ This is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.
 - Request alerts now play even when the agent is in the active workspace, while completion sounds remain limited to background workspaces.
 
 ### Fixed
-- Existing remote recovery tickets now reconcile automatically on every server start even when automatic handoff is currently disabled. A remote host's authoritative ended response consumes the stale ticket and repairs the reserved pane instead of replaying split state, while unreachable terminals retain independent 120-second recovery deadlines.
 - Improved foreground job detection on Linux and macOS so herdr can recognize agents that run through wrapper processes or generic runtimes, including cases like Codex running under `node`.
 - Made Claude Code state detection more stable by handling more spinner variants and smoothing short busy/idle flicker during screen updates.
 
