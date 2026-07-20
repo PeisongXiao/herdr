@@ -17,12 +17,7 @@ herdr --remote workbox --remote-keybindings server
 herdr --remote workbox --handoff
 herdr --no-session            # シングルプロセスの逃げ道
 herdr --default-config        # デフォルト設定を表示
-herdr update                  # 設定済みチャンネルからダウンロードしてインストール
-herdr update --handoff        # 対応する実行中サーバーでライブハンドオフにオプトイン
 herdr completion zsh          # zsh 補完スクリプトを生成
-herdr channel show            # stable または preview を表示
-herdr channel set preview     # プレビュービルドにオプトイン
-herdr channel set stable      # Linux/macOS の直接インストールを安定版に戻す
 herdr --version               # バージョンを表示
 ```
 
@@ -85,11 +80,10 @@ herdr server ensure [--json]
 herdr server stop
 herdr server reload-config
 herdr server agent-manifests [--json]
-herdr server update-agent-manifests [--json]
 herdr server reload-agent-manifests
 ```
 
-`herdr server` はヘッドレスサーバーを明示的に起動します。監視下やサービス的な構成で使ってください。`ensure` はサーバーが未起動の場合だけバックグラウンドサーバーを起動します。`server stop` は remotely presented pane を終了する場合に警告するため、残す必要があれば先にそのペイン内で `herdr remote-handoff` を実行するか、`[remote] auto_remote_handoff` を有効にして停止時にすべての委譲ペインを自動で引き渡します。`reload-config` はペインを再起動せずにリロード可能な設定を適用します。`agent-manifests` は、アクティブなエージェント検出マニフェストのソース、キャッシュされたリモートバージョン、直近のリモート更新結果を表示します。`update-agent-manifests` はリモートマニフェストの更新を即座に取得し、実行中のサーバーにリロードして、更新後のマニフェスト状態を表示します。生のステータスレスポンスが欲しいときは `--json` を渡してください。`reload-agent-manifests` は、ローカルオーバーライドの編集後にエージェント検出マニフェストを実行中のサーバーにリロードします。
+`herdr server` はヘッドレスサーバーを明示的に起動します。監視下やサービス的な構成で使ってください。`ensure` はサーバーが未起動の場合だけバックグラウンドサーバーを起動します。`server stop` は remotely presented pane を終了する場合に警告するため、残す必要があれば先にそのペイン内で `herdr remote-handoff` を実行するか、`[remote] auto_remote_handoff` を有効にして停止時にすべての委譲ペインを自動で引き渡します。`reload-config` はペインを再起動せずにリロード可能な設定を適用します。`agent-manifests` は active な bundled/local agent detection manifest の source と warning を表示します。raw status response には `--json` を渡してください。`reload-agent-manifests` は local override の編集後に manifest を実行中 server へ reload します。
 
 ## 通知
 
@@ -257,9 +251,9 @@ herdr remote-handoff
 
 `agent read` は解決されたターミナルストリームを読みます。`agent send` はそのストリームにリテラルのテキストを書き込みます。`agent get`、`agent focus`、`agent wait`、`agent attach` は、解決されたターミナルがエージェントのアイデンティティを持つことを要求します。`agent rename` はそのアイデンティティを割り当てられます。
 
-`agent explain` は、スクリーン検出が使うのと同じ下部バッファの検出スナップショットの分類を実行中のサーバーに依頼します。そのためライブの出力はサーバーのアクティブなマニフェストキャッシュを反映します。これは `agent.explain` ソケットメソッドを使うので、Herdr のアップグレード後にライブ explain を使う前に、サーバーを再起動するか更新済みサーバーへハンドオフしてください。保存済みフィクスチャをローカルで説明するには `--file PATH --agent LABEL` を使います。デフォルトの出力には、エージェント、最終状態、マニフェストのソースとバージョン、リージョンの証拠付きでマッチしたルール、そしてフォールバック・スキップ・警告の理由が表示されます。`--verbose` を付けると、可視の証拠フラグ、キャッシュされたリモートバージョン、ローカルオーバーライドのシャドーイング、リモート更新状況、マッチャーとリージョンの証拠付きの評価済みルール全リストが表示されます。issue の報告やテストには `--json` を付けてください。
+`agent explain` は、スクリーン検出が使うのと同じ下部バッファの検出スナップショットの分類を実行中のサーバーに依頼します。そのためライブの出力はサーバーのアクティブなマニフェストキャッシュを反映します。これは `agent.explain` ソケットメソッドを使うので、Herdr のアップグレード後にライブ explain を使う前に、サーバーを再起動するか更新済みサーバーへハンドオフしてください。保存済みフィクスチャをローカルで説明するには `--file PATH --agent LABEL` を使います。デフォルトの出力には、エージェント、最終状態、マニフェストのソースとバージョン、リージョンの証拠付きでマッチしたルール、そしてフォールバック・スキップ・警告の理由が表示されます。`--verbose` を付けると、可視の証拠フラグとマッチャー/リージョンの証拠付きの評価済みルール全リストが表示されます。issue の報告やテストには `--json` を付けてください。
 
-`agent start --ssh TARGET` は Unix-only です。remote `PATH` と既知の user/system、Homebrew、mise、Nix location から Herdr を探し、必要なら互換 daemon を起動し、agent を remote で起動して pane を local workspace へ委譲します。remote binary の bootstrap/install/update は行いません。`--agent AGENT` が公式 integration を選び、省略時は `argv[0]` を認識します。setup を省くには `--no-remote-integration` を使います。default remote session は明示的に `default` で、named session は `--ssh-session NAME` だけが選びます。SSH option は config に置き、CLI/server は managed SSH 前に対話意味を変える有効 config を拒否します。
+`agent start --ssh TARGET` は Unix-only で、互換性のある `peisongxiao/herdr` build が remote host に事前 install されている必要があります。remote `PATH` または `~/.local/bin/herdr` で binary を探し、その daemon と agent を起動して pane を local workspace へ委譲します。remote binary の provision/install/update は行いません。`--agent AGENT` が公式 integration を選び、省略時は `argv[0]` を認識します。setup を省くには `--no-remote-integration` を使います。default remote session は明示的に `default` で、named session は `--ssh-session NAME` だけが選びます。SSH option は config に置き、CLI/server は managed SSH 前に対話意味を変える有効 config を拒否します。
 
 delegated pane は presentation owner が一つだけで、local presentation 中は remote workspace から除かれます。owner pane の close、owner server の stop、SSH loss は remote pane と agent を終了し、shell として復元したり later reattach を待ったりしません。残すには先にそのペイン内で `herdr remote-handoff` を実行します。
 

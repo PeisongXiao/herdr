@@ -226,10 +226,6 @@ pub enum ResponseResult {
         manifests: Vec<AgentManifestInfo>,
     },
     AgentManifestStatus {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_check_unix: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_result: Option<String>,
         manifests: Vec<AgentManifestInfo>,
     },
     PluginLinked {
@@ -290,15 +286,6 @@ pub struct AgentManifestInfo {
     pub source_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cached_remote_version: Option<String>,
-    pub local_override_shadowing_remote: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_update_result: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_update_error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_last_checked_unix: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }

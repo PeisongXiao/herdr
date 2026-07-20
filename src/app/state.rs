@@ -747,8 +747,6 @@ pub struct ViewState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Onboarding,
-    ReleaseNotes,
-    ProductAnnouncement,
     Navigate,
     Prefix,
     Copy,
@@ -1059,12 +1057,6 @@ pub(crate) enum DragTarget {
         pane_id: crate::layout::PaneId,
         grab_row_offset: u16,
     },
-    ReleaseNotesScrollbar {
-        grab_row_offset: u16,
-    },
-    ProductAnnouncementScrollbar {
-        grab_row_offset: u16,
-    },
     KeybindHelpScrollbar {
         grab_row_offset: u16,
     },
@@ -1323,22 +1315,6 @@ pub struct CopyFeedback {
     pub message: String,
 }
 
-pub struct ReleaseNotesState {
-    pub version: String,
-    pub body: String,
-    pub scroll: u16,
-    pub preview: bool,
-}
-
-pub struct ProductAnnouncementState {
-    pub version: String,
-    pub id: String,
-    pub title: String,
-    pub body: String,
-    pub scroll: u16,
-    pub preview: bool,
-}
-
 pub struct KeybindHelpState {
     pub scroll: u16,
 }
@@ -1409,8 +1385,6 @@ pub struct AppState {
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
-    pub release_notes: Option<ReleaseNotesState>,
-    pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
     pub navigator: NavigatorState,
     pub copy_mode: Option<CopyModeState>,
@@ -1433,10 +1407,6 @@ pub struct AppState {
     /// resolution can evolve independently of the restore worker lifecycle.
     pub orphan_review: Option<OrphanReviewState>,
     // Notifications
-    pub update_available: Option<String>,
-    pub update_install_command: String,
-    pub latest_release_notes_available: bool,
-    pub update_dismissed: bool,
     pub config_diagnostic: Option<String>,
     pub toast: Option<ToastNotification>,
     pub pending_agent_notifications: std::collections::HashMap<PaneId, PendingAgentNotification>,
@@ -1519,8 +1489,6 @@ pub struct AppState {
     pub integration_recommendations: Vec<crate::integration::IntegrationRecommendation>,
     /// Cached detection manifest source/version summaries for runtime/API status.
     pub agent_manifest_summaries: Vec<crate::detect::manifest::AgentManifestSummary>,
-    /// Cached remote detection manifest update diagnostics for runtime/API status.
-    pub agent_manifest_update_status: crate::detect::manifest_update::ManifestUpdateStatus,
     /// Result messages from the latest integration install action.
     pub integration_install_messages: Vec<String>,
     /// Installed or linked plugins known to this running Herdr instance.
@@ -1594,12 +1562,11 @@ impl AppState {
     }
 
     pub(crate) fn global_menu_attention_badge_visible(&self) -> bool {
-        self.update_available.is_some() || self.integration_updates_available()
+        self.integration_updates_available()
     }
 
     pub(crate) fn global_menu_item_has_badge(&self, item: &str) -> bool {
-        (item == "update ready" && self.update_available.is_some())
-            || (item == "settings" && self.integration_updates_available())
+        item == "settings" && self.integration_updates_available()
     }
 
     pub(crate) fn settings_section_has_badge(&self, section: SettingsSection) -> bool {
@@ -1774,8 +1741,6 @@ impl AppState {
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
-            release_notes: None,
-            product_announcement: None,
             keybind_help: KeybindHelpState { scroll: 0 },
             navigator: NavigatorState::default(),
             copy_mode: None,
@@ -1808,10 +1773,6 @@ impl AppState {
             context_menu: None,
             remote_restore_panels: std::collections::HashMap::new(),
             orphan_review: None,
-            update_available: None,
-            update_install_command: "herdr update".into(),
-            latest_release_notes_available: false,
-            update_dismissed: false,
             config_diagnostic: None,
             toast: None,
             pending_agent_notifications: std::collections::HashMap::new(),
@@ -1883,8 +1844,6 @@ impl AppState {
             },
             integration_recommendations: Vec::new(),
             agent_manifest_summaries: Vec::new(),
-            agent_manifest_update_status:
-                crate::detect::manifest_update::ManifestUpdateStatus::default(),
             integration_install_messages: Vec::new(),
             installed_plugins: std::collections::HashMap::new(),
             plugin_panes: std::collections::HashMap::new(),

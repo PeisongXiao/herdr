@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate bundled and published agent detection manifests."""
+"""Validate bundled agent detection manifests."""
 
 from __future__ import annotations
 
@@ -12,8 +12,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BUNDLED_DIR = PROJECT_ROOT / "src" / "detect" / "manifests"
-DEFAULT_WEBSITE_DIR = PROJECT_ROOT / "website" / "agent-detection"
-ENGINE_SOURCE = PROJECT_ROOT / "src" / "detect" / "manifest_update.rs"
+ENGINE_SOURCE = PROJECT_ROOT / "src" / "detect" / "schema.rs"
 
 MANIFEST_KEYS = {"id", "version", "min_engine_version", "updated_at", "aliases", "rules"}
 RULE_KEYS = {
@@ -53,13 +52,7 @@ MAX_MATCHER_CHARS = 512
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundled-dir", type=Path, default=DEFAULT_BUNDLED_DIR)
-    parser.add_argument("--website-dir", type=Path, default=DEFAULT_WEBSITE_DIR)
     parser.add_argument("--engine-version", type=int)
-    parser.add_argument(
-        "--require-website",
-        action="store_true",
-        help="fail if website agent-detection assets or catalog are missing",
-    )
     return parser.parse_args()
 
 
@@ -92,15 +85,6 @@ def version_tuple(value: str, path: Path) -> tuple[int, ...]:
     if not isinstance(value, str) or not VERSION_RE.fullmatch(value):
         raise CheckError(f"{path}: version must be dotted numeric")
     return tuple(int(part) for part in value.split("."))
-
-
-def compare_versions(left: str, right: str, path: Path) -> int:
-    left_parts = list(version_tuple(left, path))
-    right_parts = list(version_tuple(right, path))
-    width = max(len(left_parts), len(right_parts))
-    left_parts.extend([0] * (width - len(left_parts)))
-    right_parts.extend([0] * (width - len(right_parts)))
-    return (left_parts > right_parts) - (left_parts < right_parts)
 
 
 def validate_manifest(path: Path, engine_version: int) -> dict:
@@ -258,72 +242,11 @@ def load_manifest_dir(path: Path, engine_version: int) -> dict[str, tuple[Path, 
     return manifests
 
 
-def validate_catalog(
-    website_dir: Path,
-    bundled: dict[str, tuple[Path, dict]],
-    engine_version: int,
-) -> None:
-    catalog_path = website_dir / "index.toml"
-    catalog = load_toml(catalog_path)
-    if set(catalog) != {"schema_version", "agents"}:
-        raise CheckError(f"{catalog_path}: expected only schema_version and agents")
-    if catalog.get("schema_version") != 1:
-        raise CheckError(f"{catalog_path}: schema_version must be 1")
-    agents = catalog.get("agents")
-    if not isinstance(agents, list):
-        raise CheckError(f"{catalog_path}: agents must be an array")
-
-    seen: dict[str, str] = {}
-    for entry in agents:
-        if not isinstance(entry, dict) or set(entry) != {"id", "path"}:
-            raise CheckError(f"{catalog_path}: each agent entry must contain id and path")
-        agent_id = entry["id"]
-        rel_path = entry["path"]
-        if not isinstance(agent_id, str) or not isinstance(rel_path, str):
-            raise CheckError(f"{catalog_path}: agent id and path must be strings")
-        if agent_id in seen:
-            raise CheckError(f"{catalog_path}: duplicate catalog agent {agent_id}")
-        if "://" in rel_path or rel_path.startswith("/") or ".." in Path(rel_path).parts:
-            raise CheckError(f"{catalog_path}: unsafe path for {agent_id}: {rel_path}")
-        if agent_id not in bundled:
-            raise CheckError(f"{catalog_path}: unknown agent {agent_id}; binary cannot identify it")
-        manifest_path = website_dir / rel_path
-        manifest = validate_manifest(manifest_path, engine_version)
-        if manifest["id"] != agent_id:
-            raise CheckError(f"{manifest_path}: id {manifest['id']} does not match catalog {agent_id}")
-        seen[agent_id] = rel_path
-
-        bundled_path, bundled_manifest = bundled[agent_id]
-        cmp = compare_versions(manifest["version"], bundled_manifest["version"], manifest_path)
-        if cmp < 0:
-            raise CheckError(
-                f"{manifest_path}: website version {manifest['version']} is lower than bundled "
-                f"{bundled_manifest['version']} in {bundled_path}"
-            )
-        if cmp == 0 and manifest_path.read_text(encoding="utf-8") != bundled_path.read_text(encoding="utf-8"):
-            raise CheckError(
-                f"{manifest_path}: same version as bundled {bundled_manifest['version']} but content differs"
-            )
-
-    missing = sorted(set(bundled) - set(seen))
-    if missing:
-        raise CheckError(f"{catalog_path}: missing bundled agent(s): {', '.join(missing)}")
-
-    catalog_paths = set(seen.values()) | {"index.toml"}
-    extra = sorted(path.name for path in website_dir.glob("*.toml") if path.name not in catalog_paths)
-    if extra:
-        raise CheckError(f"{website_dir}: TOML file(s) not listed in catalog: {', '.join(extra)}")
-
-
 def main() -> int:
     args = parse_args()
     try:
         engine_version = read_engine_version(args.engine_version)
-        bundled = load_manifest_dir(args.bundled_dir, engine_version)
-        if args.require_website or args.website_dir.exists():
-            if not args.website_dir.is_dir():
-                raise CheckError(f"{args.website_dir}: website manifest directory is missing")
-            validate_catalog(args.website_dir, bundled, engine_version)
+        load_manifest_dir(args.bundled_dir, engine_version)
     except CheckError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

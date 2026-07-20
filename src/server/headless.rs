@@ -2083,44 +2083,6 @@ impl HeadlessServer {
 
                 true
             }
-            AppEvent::UpdateReady {
-                version,
-                install_command,
-            } => {
-                let toast_before = self.app.state.toast.clone();
-                let version = version.clone();
-                let install_command = install_command.clone();
-
-                self.app.handle_internal_event(ev);
-
-                let toast_msg =
-                    if should_forward_toast_to_clients(self.app.state.toast_config.delivery) {
-                        if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
-                            self.app
-                                .state
-                                .toast
-                                .as_ref()
-                                .map(|toast| format!("{}: {}", toast.title, toast.context))
-                        } else {
-                            Some(format!(
-                                "v{version} available: {}",
-                                crate::update::update_install_instruction(&install_command)
-                            ))
-                        }
-                    } else {
-                        None
-                    };
-
-                if let Some(msg) = toast_msg {
-                    self.send_flat_toast_to_foreground_client(
-                        toast_notify_kind(self.app.state.toast_config.delivery)
-                            .expect("toast forwarding requires a client notification kind"),
-                        msg,
-                    );
-                }
-
-                true
-            }
             AppEvent::PaneDied { pane_id } => {
                 let pane_id_val = *pane_id;
                 let terminal_id = self
@@ -3869,22 +3831,6 @@ impl HeadlessServer {
 
         if self
             .app
-            .next_auto_update_check
-            .is_some_and(|deadline| now >= deadline)
-        {
-            self.app.run_auto_update_check();
-        }
-
-        if self
-            .app
-            .next_agent_manifest_update_check
-            .is_some_and(|deadline| now >= deadline)
-        {
-            self.app.run_agent_manifest_update_check();
-        }
-
-        if self
-            .app
             .session_save_deadline
             .is_some_and(|deadline| now >= deadline)
         {
@@ -4533,13 +4479,24 @@ mod tests {
     #[test]
     fn headless_api_request_drains_all_pending_internal_events_before_reading_state() {
         let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("headless-api-drain");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
         for i in 0..=crate::app::APP_EVENT_DRAIN_LIMIT {
             server
                 .app
                 .event_tx
-                .try_send(AppEvent::UpdateReady {
-                    version: format!("4.0.{i}"),
-                    install_command: "herdr install".into(),
+                .try_send(AppEvent::HookStateReported {
+                    pane_id,
+                    source: "test:headless-api-drain".into(),
+                    agent_label: "codex".into(),
+                    state: crate::detect::AgentState::Working,
+                    message: None,
+                    custom_status: Some(format!("status-{i}")),
+                    seq: Some(i as u64 + 1),
+                    session_ref: None,
                 })
                 .unwrap();
         }
@@ -4561,10 +4518,16 @@ mod tests {
 
         assert_eq!(response["result"]["type"], "ok");
         assert_eq!(response["result"]["terminated_remote_presentations"], 0);
-        let expected_version = format!("4.0.{}", crate::app::APP_EVENT_DRAIN_LIMIT);
         assert_eq!(
-            server.app.state.update_available.as_deref(),
-            Some(expected_version.as_str())
+            server
+                .app
+                .state
+                .terminals
+                .get(&terminal_id)
+                .unwrap()
+                .effective_custom_status()
+                .as_deref(),
+            Some(format!("status-{}", crate::app::APP_EVENT_DRAIN_LIMIT).as_str())
         );
         assert!(server.app.event_rx.try_recv().is_err());
     }
@@ -6227,16 +6190,6 @@ next_tab = ""
                         } if custom_status.is_none()
                     )
             }));
-    }
-
-    #[test]
-    fn headless_scheduled_tasks_clears_disabled_agent_manifest_update_deadline() {
-        let mut server = test_headless_server();
-        let now = Instant::now();
-        server.app.next_agent_manifest_update_check = Some(now - Duration::from_millis(1));
-
-        assert!(!server.handle_scheduled_tasks_headless(now, false));
-        assert_eq!(server.app.next_agent_manifest_update_check, None);
     }
 
     #[tokio::test]
@@ -8670,88 +8623,6 @@ next_tab = ""
                 .is_err(),
             "background client should not receive client-local notifications"
         );
-    }
-
-    #[test]
-    fn herdr_toast_delivery_keeps_toast_in_frame_without_client_notify() {
-        let mut server = test_headless_server();
-        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
-
-        server.clients.insert(
-            1,
-            ClientConnection::new(
-                (80, 24),
-                crate::kitty_graphics::HostCellSize::default(),
-                crate::terminal_theme::TerminalTheme::default(),
-                None,
-                1,
-                RenderEncoding::SemanticFrame,
-                Some(client_tx),
-            ),
-        );
-        server.foreground_client_id = Some(1);
-        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
-
-        let changed = server.handle_internal_event_with_forwarding(AppEvent::UpdateReady {
-            version: "9.9.9".to_string(),
-            install_command: "herdr update".into(),
-        });
-
-        assert!(changed);
-        assert!(server.app.state.toast.is_some());
-        assert!(
-            client_control_rx
-                .recv_timeout(Duration::from_millis(50))
-                .is_err(),
-            "herdr delivery should render in-frame instead of forwarding a client-local notification"
-        );
-    }
-
-    #[test]
-    fn system_toast_delivery_forwards_system_notify_kind() {
-        let mut server = test_headless_server();
-        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
-
-        server.clients.insert(
-            1,
-            ClientConnection::new(
-                (80, 24),
-                crate::kitty_graphics::HostCellSize::default(),
-                crate::terminal_theme::TerminalTheme::default(),
-                None,
-                1,
-                RenderEncoding::SemanticFrame,
-                Some(client_tx),
-            ),
-        );
-        server.foreground_client_id = Some(1);
-        server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
-
-        let changed = server.handle_internal_event_with_forwarding(AppEvent::UpdateReady {
-            version: "9.9.9".to_string(),
-            install_command: "herdr update".into(),
-        });
-
-        assert!(changed);
-        match read_server_message(
-            client_control_rx
-                .recv_timeout(Duration::from_millis(100))
-                .expect("system toast message"),
-        ) {
-            ServerMessage::Notify {
-                kind,
-                message,
-                body,
-            } => {
-                assert_eq!(kind, protocol::NotifyKind::SystemToast);
-                assert_eq!(message, "v9.9.9 available");
-                assert_eq!(
-                    body.as_deref(),
-                    Some("detach, run `herdr update`, then follow its restart guidance")
-                );
-            }
-            other => panic!("expected system toast notify, got {other:?}"),
-        }
     }
 
     #[test]

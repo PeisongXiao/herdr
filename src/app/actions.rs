@@ -2479,58 +2479,6 @@ impl AppState {
                 self.handle_pane_died(pane_id);
                 Vec::new()
             }
-            AppEvent::UpdateReady {
-                version,
-                install_command,
-            } => {
-                self.update_available = Some(version.clone());
-                self.update_install_command = install_command.clone();
-                self.latest_release_notes_available = true;
-                self.update_dismissed = true;
-                if matches!(
-                    self.toast_config.delivery,
-                    crate::config::ToastDelivery::Herdr
-                ) {
-                    self.toast = Some(ToastNotification {
-                        kind: ToastKind::UpdateInstalled,
-                        title: format!("v{version} available"),
-                        context: crate::update::update_install_instruction(&install_command),
-                        position: None,
-                        target: None,
-                    });
-                }
-                Vec::new()
-            }
-            AppEvent::AgentDetectionManifestsUpdated { updated, status } => {
-                self.agent_manifest_update_status = status;
-                self.refresh_agent_manifest_summaries();
-                if !updated.is_empty()
-                    && matches!(
-                        self.toast_config.delivery,
-                        crate::config::ToastDelivery::Herdr
-                    )
-                {
-                    let agent_list = updated
-                        .iter()
-                        .map(|item| {
-                            format!(
-                                "{} {}",
-                                crate::detect::agent_label(item.agent),
-                                item.version
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    self.toast = Some(ToastNotification {
-                        kind: ToastKind::UpdateInstalled,
-                        title: "Agent detection rules updated".to_string(),
-                        context: agent_list,
-                        position: None,
-                        target: None,
-                    });
-                }
-                Vec::new()
-            }
             AppEvent::PeerAgentsRefreshed { .. }
             | AppEvent::PeerConnectSshFinished(_)
             | AppEvent::RemoteAgentStartFinished(_)
@@ -4987,79 +4935,6 @@ mod tests {
         assert!(active_tab_suppresses_notifications(true, Some(true)));
         assert!(!active_tab_suppresses_notifications(true, Some(false)));
         assert!(!active_tab_suppresses_notifications(false, None));
-    }
-
-    #[test]
-    fn update_ready_sets_manual_update_toast() {
-        let mut state = AppState::test_new();
-        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
-
-        let updates = state.handle_app_event(AppEvent::UpdateReady {
-            version: "0.5.0".into(),
-            install_command: "herdr update".into(),
-        });
-
-        assert!(updates.is_empty());
-        assert_eq!(state.update_available.as_deref(), Some("0.5.0"));
-        assert!(state.latest_release_notes_available);
-        assert!(state.update_dismissed);
-        let toast = state.toast.as_ref().expect("update toast");
-        assert_eq!(toast.kind, ToastKind::UpdateInstalled);
-        assert_eq!(toast.title, "v0.5.0 available");
-        assert_eq!(
-            toast.context,
-            "detach, run `herdr update`, then follow its restart guidance"
-        );
-    }
-
-    #[test]
-    fn update_ready_uses_event_install_command_in_toast() {
-        let mut state = AppState::test_new();
-        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
-
-        state.handle_app_event(AppEvent::UpdateReady {
-            version: "0.5.0".into(),
-            install_command: "brew update && brew upgrade herdr".into(),
-        });
-
-        assert_eq!(
-            state.update_install_command,
-            "brew update && brew upgrade herdr"
-        );
-        let toast = state.toast.as_ref().expect("update toast");
-        assert_eq!(
-            toast.context,
-            "detach, run `brew update && brew upgrade herdr`, then restart this Herdr session when ready"
-        );
-    }
-
-    #[test]
-    fn agent_detection_manifest_update_event_updates_status_and_toast() {
-        let mut state = AppState::test_new();
-        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
-        let status = crate::detect::manifest_update::ManifestUpdateStatus {
-            last_result: Some("checked".to_string()),
-            ..Default::default()
-        };
-
-        let updates = state.handle_app_event(AppEvent::AgentDetectionManifestsUpdated {
-            updated: vec![crate::detect::manifest_update::ManifestUpdateCommit {
-                agent: Agent::Codex,
-                version: crate::detect::manifest_update::ManifestVersion::parse("2026.06.10.1")
-                    .unwrap(),
-            }],
-            status,
-        });
-
-        assert!(updates.is_empty());
-        assert_eq!(
-            state.agent_manifest_update_status.last_result.as_deref(),
-            Some("checked")
-        );
-        let toast = state.toast.as_ref().expect("manifest update toast");
-        assert_eq!(toast.kind, ToastKind::UpdateInstalled);
-        assert_eq!(toast.title, "Agent detection rules updated");
-        assert_eq!(toast.context, "codex 2026.06.10.1");
     }
 
     #[test]

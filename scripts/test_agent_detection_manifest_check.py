@@ -18,75 +18,25 @@ contains = ["{contains}"]
 '''
 
 
-def catalog(agent_id: str = "codex", path: str = "codex.toml") -> str:
-    return f'''schema_version = 1
-
-[[agents]]
-id = "{agent_id}"
-path = "{path}"
-'''
-
-
 class AgentDetectionManifestCheckTests(unittest.TestCase):
-    def test_validates_bundled_and_matching_website_catalog(self):
+    def test_validates_bundled_manifests(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bundled = root / "bundled"
-            website = root / "website"
+            bundled = Path(tmp) / "bundled"
             bundled.mkdir()
-            website.mkdir()
             content = manifest("codex", "2026.06.10.1")
             (bundled / "codex.toml").write_text(content)
-            (website / "codex.toml").write_text(content)
-            (website / "index.toml").write_text(catalog())
 
             bundled_manifests = check.load_manifest_dir(bundled, engine_version=1)
-            check.validate_catalog(website, bundled_manifests, engine_version=1)
+            self.assertEqual(set(bundled_manifests), {"codex"})
 
-    def test_rejects_website_version_lower_than_bundled(self):
+    def test_rejects_invalid_manifest_version(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bundled = root / "bundled"
-            website = root / "website"
+            bundled = Path(tmp) / "bundled"
             bundled.mkdir()
-            website.mkdir()
-            (bundled / "codex.toml").write_text(manifest("codex", "2026.06.10.2"))
-            (website / "codex.toml").write_text(manifest("codex", "2026.06.10.1"))
-            (website / "index.toml").write_text(catalog())
+            (bundled / "codex.toml").write_text(manifest("codex", "2026.invalid"))
 
-            bundled_manifests = check.load_manifest_dir(bundled, engine_version=1)
-            with self.assertRaisesRegex(check.CheckError, "lower than bundled"):
-                check.validate_catalog(website, bundled_manifests, engine_version=1)
-
-    def test_rejects_same_version_content_drift(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bundled = root / "bundled"
-            website = root / "website"
-            bundled.mkdir()
-            website.mkdir()
-            (bundled / "codex.toml").write_text(manifest("codex", "2026.06.10.1", "ready"))
-            (website / "codex.toml").write_text(manifest("codex", "2026.06.10.1", "changed"))
-            (website / "index.toml").write_text(catalog())
-
-            bundled_manifests = check.load_manifest_dir(bundled, engine_version=1)
-            with self.assertRaisesRegex(check.CheckError, "same version"):
-                check.validate_catalog(website, bundled_manifests, engine_version=1)
-
-    def test_rejects_unknown_catalog_agent(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bundled = root / "bundled"
-            website = root / "website"
-            bundled.mkdir()
-            website.mkdir()
-            (bundled / "codex.toml").write_text(manifest("codex", "2026.06.10.1"))
-            (website / "newagent.toml").write_text(manifest("newagent", "2026.06.10.1"))
-            (website / "index.toml").write_text(catalog("newagent", "newagent.toml"))
-
-            bundled_manifests = check.load_manifest_dir(bundled, engine_version=1)
-            with self.assertRaisesRegex(check.CheckError, "unknown agent"):
-                check.validate_catalog(website, bundled_manifests, engine_version=1)
+            with self.assertRaisesRegex(check.CheckError, "dotted numeric"):
+                check.load_manifest_dir(bundled, engine_version=1)
 
     def test_rejects_manifest_requiring_newer_engine(self):
         with tempfile.TemporaryDirectory() as tmp:

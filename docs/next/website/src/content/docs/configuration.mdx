@@ -33,23 +33,6 @@ Herdr shows first-run setup when `onboarding` is missing or true. Continuing fro
 onboarding = false
 ```
 
-## Updates
-
-Linux and macOS direct installs use the stable update channel by default. Windows beta installs default to preview and cannot switch to stable until stable Windows releases are available.
-
-```toml
-[update]
-channel = "stable"
-version_check = true
-manifest_check = true
-```
-
-Set `channel = "preview"` to make `herdr update` install manually published preview builds from the current development branch. Homebrew, mise, and Nix installs ignore the preview channel and update through their package managers.
-
-Set `version_check = false` to disable background checks for new Herdr versions. Manual `herdr update` still uses the configured channel.
-
-Set `manifest_check = false` to disable background remote agent-detection manifest checks. Herdr still uses bundled manifests and local overrides.
-
 ## Reload config
 
 Reload a running server after editing `config.toml`:
@@ -121,7 +104,7 @@ auto_remote_handoff = false
 
 When enabled, `herdr --remote` writes a private temporary SSH config that includes your `~/.ssh/config` and `/etc/ssh/ssh_config` first, then adds fallback `ServerAliveInterval` and `ServerAliveCountMax` values. Your own keepalive settings win. Herdr also uses a private per-attach OpenSSH control socket to reuse the first authenticated connection. Set `manage_ssh_config = false` to run remote attach through plain `ssh` without Herdr's generated config or control socket.
 
-On Unix, `ssh_integration` puts a small `ssh` shim first on each Herdr pane's `PATH`. Destination-only interactive `ssh TARGET` invocations authenticate with normal foreground OpenSSH, find or start a compatible remote Herdr daemon, and exclusively delegate a shell from its default session into the current pane. The remote host must already have Herdr with the required peer-federation and remote-presentation capabilities; setup failures warn and fall back to ordinary SSH. Remote-command, noninteractive or sessionless, forwarding, tunnel, and local-command semantics also fall through to the real `ssh` unchanged. Herdr applies that boundary to effective SSH config as well as literal arguments, so matching `Host`, `Match`, or included config is preserved rather than overridden to force integration.
+On Unix, `ssh_integration` puts a small `ssh` shim first on each Herdr pane's `PATH`. Destination-only interactive `ssh TARGET` invocations authenticate with normal foreground OpenSSH, find or start a compatible remote Herdr daemon, and exclusively delegate a shell from its default session into the current pane. The remote host must already have a compatible `peisongxiao/herdr` build with the required peer-federation and remote-presentation capabilities; Herdr never provisions it. Setup failures warn and fall back to ordinary SSH. Remote-command, noninteractive or sessionless, forwarding, tunnel, and local-command semantics also fall through to the real `ssh` unchanged. Herdr applies that boundary to effective SSH config as well as literal arguments, so matching `Host`, `Match`, or included config is preserved rather than overridden to force integration.
 
 For newly created macOS login-zsh panes, including the default `shell_mode = "auto"` path, Herdr uses a private one-shot startup hook. It restores the user's original `ZDOTDIR` and startup files, then re-prepends the shim and runs `rehash` at the first prompt after `path_helper` and other login setup have finished. The hook removes itself after that prompt. User aliases and functions still take their normal precedence, and an explicit absolute path such as `/usr/bin/ssh` bypasses the shim. Existing panes keep their current environment until they are recreated.
 

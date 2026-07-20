@@ -688,31 +688,26 @@ herdr wait agent-status w1:p1 --status blocked
 }
 ```
 
-`server.agent_manifests` 返回生效的智能体检测清单来源和远程更新诊断信息,不重载规则:
+`server.agent_manifests` 返回生效的 bundled/local 智能体检测清单来源,不重载规则:
 
 ```json
 {
   "id": "req_1",
   "result": {
     "type": "agent_manifest_status",
-    "last_check_unix": 1781043522,
-    "last_result": "checked",
     "manifests": [
       {
         "agent": "cursor",
         "source": "/home/me/.config/herdr/agent-detection/cursor.toml",
         "source_kind": "local override",
-        "active_version": "2026.06.10.1",
-        "cached_remote_version": "2026.06.10.1",
-        "local_override_shadowing_remote": true,
-        "remote_update_result": "current"
+        "active_version": "2026.06.10.1"
       }
     ]
   }
 }
 ```
 
-`last_check_unix`、`last_result`、`active_version`、`cached_remote_version`、`remote_update_result`、`remote_update_error`、`remote_last_checked_unix` 和 `warning` 这类字段在不可用时被省略。`server.reload_agent_manifests` 在重载内存中的规则缓存后,返回带相同 `manifests` 条目结构的 `agent_manifest_reload`。
+可选的 `active_version` 与 `warning` 字段在不可用时被省略。`server.reload_agent_manifests` 在重载内存中的规则缓存后,返回带相同 `manifests` 条目结构的 `agent_manifest_reload`。
 
 `agent.explain` 使用服务器生效的清单缓存,在运行中的服务器上评估目标窗格的检测快照:
 

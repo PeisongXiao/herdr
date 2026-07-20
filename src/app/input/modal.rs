@@ -75,21 +75,17 @@ pub(super) fn modal_action_from_buttons<A: Copy>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GlobalMenuAction {
     Detach,
-    WhatsNew,
     Keybinds,
     ReloadConfig,
     Settings,
 }
 
-pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
+pub(super) fn global_menu_actions(_state: &AppState) -> Vec<GlobalMenuAction> {
     let mut actions = vec![
         GlobalMenuAction::Settings,
         GlobalMenuAction::Keybinds,
         GlobalMenuAction::ReloadConfig,
     ];
-    if state.update_available.is_some() || state.latest_release_notes_available {
-        actions.push(GlobalMenuAction::WhatsNew);
-    }
     actions.push(GlobalMenuAction::Detach);
     actions
 }
@@ -102,20 +98,6 @@ pub(super) fn open_global_menu(state: &mut AppState) {
 pub(super) fn open_keybind_help(state: &mut AppState) {
     state.keybind_help.scroll = 0;
     state.mode = Mode::KeybindHelp;
-}
-
-fn open_update_release_notes(state: &mut AppState) {
-    let Some(notes) = crate::release_notes::load_latest() else {
-        return;
-    };
-
-    state.release_notes = Some(crate::app::state::ReleaseNotesState {
-        version: notes.version,
-        body: notes.body,
-        scroll: 0,
-        preview: notes.preview,
-    });
-    state.mode = Mode::ReleaseNotes;
 }
 
 pub(super) fn request_detach(state: &mut AppState) {
@@ -132,7 +114,6 @@ pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuA
             leave_modal(state);
             request_detach(state);
         }
-        GlobalMenuAction::WhatsNew => open_update_release_notes(state),
         GlobalMenuAction::Keybinds => open_keybind_help(state),
         GlobalMenuAction::ReloadConfig => {
             state.request_reload_config = true;
@@ -369,11 +350,6 @@ pub(super) fn leave_modal(state: &mut AppState) {
 pub(super) const ONBOARDING_WELCOME_ACTIONS: &[ModalActionSpec<ModalAction>] = &[ModalActionSpec {
     action: ModalAction::Continue,
     bindings: &[ModalKeyBinding::Enter],
-}];
-
-pub(super) const RELEASE_NOTES_ACTIONS: &[ModalActionSpec<ModalAction>] = &[ModalActionSpec {
-    action: ModalAction::Close,
-    bindings: &[ModalKeyBinding::Enter, ModalKeyBinding::Esc],
 }];
 
 pub(super) const RENAME_ACTIONS: &[ModalActionSpec<ModalAction>] = &[
@@ -1286,22 +1262,6 @@ mod tests {
     use super::*;
     use crate::workspace::Workspace;
 
-    fn config_env_lock() -> &'static std::sync::Mutex<()> {
-        crate::config::test_config_env_lock()
-    }
-
-    fn temp_config_path(name: &str) -> std::path::PathBuf {
-        let unique = format!(
-            "herdr-modal-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        std::env::temp_dir().join(unique).join("config.toml")
-    }
-
     fn app_with_test_workspaces(names: &[&str]) -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -1394,34 +1354,6 @@ mod tests {
 
         assert!(state.should_quit);
         assert!(!state.detach_requested);
-    }
-
-    #[test]
-    fn global_menu_whats_new_opens_saved_release_notes() {
-        let _guard = config_env_lock().lock().unwrap();
-        let path = temp_config_path("whats-new-saved-release-notes");
-        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
-        crate::release_notes::save_pending(env!("CARGO_PKG_VERSION"), "### Changed\n- Menu")
-            .unwrap();
-
-        let mut state = state_with_workspaces(&["test"]);
-        state.latest_release_notes_available = true;
-
-        assert!(global_menu_actions(&state).contains(&GlobalMenuAction::WhatsNew));
-
-        apply_global_menu_action(&mut state, GlobalMenuAction::WhatsNew);
-
-        assert_eq!(state.mode, Mode::ReleaseNotes);
-        assert_eq!(
-            state
-                .release_notes
-                .as_ref()
-                .map(|notes| notes.body.as_str()),
-            Some("### Changed\n- Menu")
-        );
-
-        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

@@ -61,7 +61,7 @@ build-libghostty-vt:
 
 # Check that release docs and changelog have been finalized from docs/next before release
 release-docs-check:
-    python3 scripts/agent_detection_manifest_check.py --require-website
+    python3 scripts/agent_detection_manifest_check.py
     @for file in README.md CHANGELOG.md; do \
         if ! diff -u "$file" "docs/next/$file"; then \
             echo "error: $file differs from docs/next/$file; finalize release docs before releasing"; \

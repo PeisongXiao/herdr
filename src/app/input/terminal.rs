@@ -30,7 +30,6 @@ impl App {
     fn prepare_terminal_key_forward(&mut self, key: TerminalKey) -> Option<PreparedPaneInput> {
         self.state.clear_selection();
         self.selection_autoscroll_deadline = None;
-        self.state.update_dismissed = true;
 
         let key_event = key.as_key_event();
 

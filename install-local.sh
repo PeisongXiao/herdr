@@ -129,6 +129,24 @@ fi
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir"
 
+if [ "$profile" = "debug" ]; then
+  profile_app_name="herdr-dev"
+else
+  profile_app_name="herdr"
+fi
+profile_config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+profile_state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+case "$profile_config_home" in
+  /*) ;;
+  *) profile_config_home="$script_dir/$profile_config_home" ;;
+esac
+case "$profile_state_home" in
+  /*) ;;
+  *) profile_state_home="$script_dir/$profile_state_home" ;;
+esac
+profile_config_root="$profile_config_home/$profile_app_name"
+profile_state_root="$profile_state_home/$profile_app_name"
+
 clean_config_root=""
 clean_state_root=""
 if [ "$clean_install" -eq 1 ]; then
@@ -456,6 +474,16 @@ trap - EXIT HUP INT TERM
 if [ -n "$clean_lock" ]; then
   rmdir "$clean_lock" >/dev/null 2>&1 || true
   clean_lock=""
+fi
+
+if ! rm -f -- "$profile_config_root/release-notes.json"; then
+  die "installed Herdr, but could not remove legacy updater cache $profile_config_root/release-notes.json"
+fi
+if ! rm -f -- "$profile_state_root/product-announcements.json"; then
+  die "installed Herdr, but could not remove legacy updater cache $profile_state_root/product-announcements.json"
+fi
+if ! rm -rf -- "$profile_state_root/agent-detection"; then
+  die "installed Herdr, but could not remove legacy updater cache $profile_state_root/agent-detection"
 fi
 
 printf 'installed Herdr to %s/herdr\n' "$bin_dir"

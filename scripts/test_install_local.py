@@ -137,6 +137,8 @@ class InstallLocalTests(unittest.TestCase):
             "HERDR_SOCKET_PATH",
             "PREFIX",
             "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
             "ZIG",
         ):
             self.base_env.pop(name, None)
@@ -297,6 +299,53 @@ class InstallLocalTests(unittest.TestCase):
             "build --locked",
         )
         self.assertTrue((self.default_target_dir() / "debug" / "herdr").exists())
+
+    def test_install_removes_only_selected_profile_legacy_updater_caches(self) -> None:
+        bin_dir = self.root / "profile-cache-bin"
+        config_home = self.root / "xdg-config"
+        state_home = self.root / "xdg-state"
+
+        for app_name in ("herdr", "herdr-dev"):
+            release_notes = config_home / app_name / "release-notes.json"
+            local_manifest = config_home / app_name / "agent-detection" / "codex.toml"
+            announcement = state_home / app_name / "product-announcements.json"
+            cached_manifest = state_home / app_name / "agent-detection" / "codex.toml"
+            for path in (release_notes, local_manifest, announcement, cached_manifest):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(app_name, encoding="utf-8")
+
+        env = {
+            "XDG_CONFIG_HOME": str(config_home),
+            "XDG_STATE_HOME": str(state_home),
+        }
+        release = self.run_installer("--bin-dir", str(bin_dir), extra_env=env)
+
+        self.assert_success(release)
+        self.assertFalse((config_home / "herdr" / "release-notes.json").exists())
+        self.assertFalse((state_home / "herdr" / "product-announcements.json").exists())
+        self.assertFalse((state_home / "herdr" / "agent-detection").exists())
+        self.assertTrue(
+            (config_home / "herdr" / "agent-detection" / "codex.toml").exists()
+        )
+        self.assertTrue((config_home / "herdr-dev" / "release-notes.json").exists())
+        self.assertTrue(
+            (state_home / "herdr-dev" / "product-announcements.json").exists()
+        )
+        self.assertTrue((state_home / "herdr-dev" / "agent-detection").exists())
+
+        debug = self.run_installer(
+            "--debug", "--bin-dir", str(bin_dir), extra_env=env
+        )
+
+        self.assert_success(debug)
+        self.assertFalse((config_home / "herdr-dev" / "release-notes.json").exists())
+        self.assertFalse(
+            (state_home / "herdr-dev" / "product-announcements.json").exists()
+        )
+        self.assertFalse((state_home / "herdr-dev" / "agent-detection").exists())
+        self.assertTrue(
+            (config_home / "herdr-dev" / "agent-detection" / "codex.toml").exists()
+        )
 
     def test_clean_release_install_stops_servers_and_resets_release_data(self) -> None:
         bin_dir = self.root / "clean-bin"
@@ -516,6 +565,20 @@ class InstallLocalTests(unittest.TestCase):
         )
         self.assert_success(first)
 
+        legacy_paths = (
+            self.home / ".config" / "herdr" / "release-notes.json",
+            self.home / ".local" / "state" / "herdr" / "product-announcements.json",
+            self.home
+            / ".local"
+            / "state"
+            / "herdr"
+            / "agent-detection"
+            / "codex.toml",
+        )
+        for path in legacy_paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("legacy", encoding="utf-8")
+
         real_mv = shutil.which("mv", path=os.environ.get("PATH"))
         if real_mv is None:
             self.fail("mv is required to test atomic replacement")
@@ -539,6 +602,7 @@ class InstallLocalTests(unittest.TestCase):
         self.assertIn("could not atomically replace", failed.stderr)
         self.assertEqual((bin_dir / "herdr").read_text(encoding="utf-8"), "first binary")
         self.assertEqual(list(bin_dir.glob(".herdr.tmp.*")), [])
+        self.assertTrue(all(path.exists() for path in legacy_paths))
 
         rerun = self.run_installer(
             "--bin-dir",

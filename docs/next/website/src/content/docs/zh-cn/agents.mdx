@@ -56,19 +56,19 @@ Claude Code、Codex、GitHub Copilot CLI、Droid、Qoder CLI 和 Cursor Agent CL
 
 ## 检测清单
 
-内置清单打包在 Herdr 内部。Herdr 还会向 herdr.dev 检查远程清单更新,并自动应用有效的按智能体规则更新,不需要重启 Herdr。远程清单存放在 Herdr 的状态目录中。设置 `[update] manifest_check = false` 可以禁用后台远程清单检查。
+内置清单打包在 Herdr 内部。这个 fork 不会获取远程清单更新。
 
-本地覆盖可以从平台配置目录替换远程或内置清单:
+本地覆盖可以从平台配置目录替换内置清单:
 
 ```text
 ~/.config/herdr/agent-detection/<agent>.toml
 ```
 
-本地覆盖始终优先。没有本地覆盖时,Herdr 在缓存的远程清单和运行中二进制文件内置的清单之间,选择更新且兼容的那个。在调试构建上,同一个配置助手可能使用 `herdr-dev` 之类的开发目录。无效的覆盖文件会被忽略并给出警告,Herdr 会对该智能体回退到缓存的远程或内置清单。
+本地覆盖始终优先。没有本地覆盖时,Herdr 使用运行中二进制文件内置的清单。在调试构建上,同一个配置助手可能使用 `herdr-dev` 之类的开发目录。无效的覆盖文件会被忽略并给出警告,Herdr 会对该智能体回退到内置清单。
 
-远程清单只为 Herdr 已经知道如何识别的智能体修补检测规则。添加全新的智能体仍然需要更新 Herdr 二进制文件,以获得进程检测、标签和集成行为。
+添加新智能体或修改内置检测规则需要更新 source checkout、重新构建并重启运行中的服务器。
 
-运行中的服务器在启动时把生效的清单加载进内存。自动的远程清单更新会在写入新规则后重新加载该内存缓存。运行 `herdr server update-agent-manifests` 可以立即拉取远程清单更新并重载运行中的服务器。手动编辑本地覆盖后,重启 Herdr 或运行 `herdr server reload-agent-manifests` 把文件应用到运行中的服务器。
+运行中的服务器在启动时把生效的清单加载进内存。手动编辑本地覆盖后,重启 Herdr 或运行 `herdr server reload-agent-manifests` 把文件应用到运行中的服务器。
 
 当某个窗格显示了错误状态时,用 `herdr agent explain`:
 
@@ -77,7 +77,7 @@ herdr agent explain <target>
 herdr agent explain --file screen.txt --agent codex --json
 ```
 
-实时 explain 由运行中的服务器评估,因此反映的是生效的清单缓存。explain 输出包括: 智能体、最终状态、屏幕检测是否被完整生命周期权威跳过、清单来源和版本、缓存的远程版本、本地覆盖的遮蔽情况、远程更新状态、匹配的规则、可见证据标志、已评估规则的匹配器和区域证据、转写查看器的跳过更新原因,以及没有规则匹配时的 idle 回退原因。
+实时 explain 由运行中的服务器评估,因此反映的是生效的清单缓存。explain 输出包括: 智能体、最终状态、屏幕检测是否被完整生命周期权威跳过、清单来源和版本、匹配的规则、可见证据标志、已评估规则的匹配器和区域证据、转写查看器的跳过更新原因、警告,以及没有规则匹配时的 idle 回退原因。
 
 Herdr 可以在 tmux 作为外层终端环境时运行。智能体检测不会检查在 Herdr 窗格内启动的 tmux 会话。如果某个 shell 框架在 Herdr 内自动进入 tmux,Herdr 看到的窗格进程就是 `tmux`,而不是它背后的智能体。
 
@@ -147,7 +147,7 @@ herdr agent start docs --workspace w1 --tab w1:t1 -- claude
 herdr agent start reviewer --ssh workbox --agent opencode --cwd /srv/project -- opencode
 ```
 
-这条 Unix-only 路径不会在普通 SSH PTY 中启动智能体。Herdr 会在远程 `PATH`、常见用户/系统、Homebrew、mise、Nix 路径以及 `~/.local/bin/herdr` 中寻找二进制,必要时启动守护进程,并验证协议、peer federation 和 remote presentation 能力;它不会安装或更新远程 Herdr。缺失或不兼容会产生明确错误。CLI 在托管 SSH 前会拒绝改变交互会话语义的有效 SSH 配置,服务器也对 SSH-backed agent/API 启动执行同样边界。
+这条 Unix-only 路径要求远程主机已经安装兼容的 `peisongxiao/herdr` build。Herdr 会在远程 `PATH` 或 source installer 的默认位置 `~/.local/bin/herdr` 中寻找二进制,必要时启动守护进程,并验证协议、peer federation 和 remote presentation 能力;它不会 provision、安装或更新远程 Herdr。缺失或不兼容会产生明确错误。CLI 在托管 SSH 前会拒绝改变交互会话语义的有效 SSH 配置,服务器也对 SSH-backed agent/API 启动执行同样边界。
 
 默认情况下,Herdr 使用 `--agent AGENT` 指定的官方集成,或识别 `argv[0]`;已有独立 hook 管理或命令并非受支持智能体时使用 `--no-remote-integration`。随后 Herdr 在远程启动智能体,从远程工作区移除其窗格,并把它独占展示到本地窗格。这是委派而不是持久镜像: 同一时间只有一台机器拥有展示权。关闭本地所有者窗格、停止其 Herdr 服务器或丢失连接都会终止远程窗格和智能体。要让它留在远程主机,请先在展示窗格内运行 `herdr remote-handoff`。默认显式选择远程 Herdr 会话 `default`;只有 `--ssh-session NAME` 会选择命名会话,继承或 SSH 接受的 `HERDR_SESSION` 与 socket 变量不能重定向它。自定义端口、jump host 和 identity 应放在 SSH 配置中。
 

@@ -12,7 +12,6 @@ mod mobile;
 mod navigator;
 mod onboarding;
 mod panes;
-mod release_notes;
 mod scrollbar;
 mod settings;
 mod sidebar;
@@ -25,6 +24,7 @@ use self::dialogs::{
     render_confirm_close_overlay, render_new_linked_worktree_overlay,
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
 };
+pub(crate) use self::keybind_help::keybind_help_close_button_rect;
 use self::keybind_help::render_keybind_help_overlay;
 use self::menus::{
     render_context_menu, render_copy_mode_overlay, render_global_launcher_menu,
@@ -41,14 +41,8 @@ use self::onboarding::render_onboarding_overlay;
 use self::panes::{compute_pane_infos, render_panes, resize_tab_panes};
 #[cfg(unix)]
 pub(crate) use self::panes::{orphan_review_areas, remote_restore_panel_button_rects};
-pub(crate) use self::release_notes::{
-    product_announcement_display_lines, release_notes_close_button_rect,
-    release_notes_display_lines, release_notes_wrapped_line_count, PRODUCT_ANNOUNCEMENT_MODAL_SIZE,
-    RELEASE_NOTES_MODAL_SIZE,
-};
-use self::release_notes::{render_product_announcement_overlay, render_release_notes_overlay};
 pub(crate) use self::scrollbar::{
-    pane_scrollbar_rect, release_notes_scrollbar_rect, scrollbar_offset_from_drag_row,
+    overlay_scrollbar_rect, pane_scrollbar_rect, scrollbar_offset_from_drag_row,
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
 };
 use self::settings::render_settings_overlay;
@@ -426,8 +420,6 @@ pub fn render_with_runtime_registry(
 
     match app.mode {
         Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
-        Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
-        Mode::ProductAnnouncement => render_product_announcement_overlay(app, frame, frame.area()),
         Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
             render_mobile_panel(app, terminal_runtimes, frame, frame.area())
         }
@@ -838,47 +830,6 @@ mod tests {
             app.workspaces[0].tabs[background_tab].runtimes[&background_pane].current_size(),
             (18, 43)
         );
-    }
-
-    #[test]
-    fn product_announcement_renders_above_config_diagnostic() {
-        let mut app = crate::app::state::AppState::test_new();
-        app.workspaces = vec![Workspace::test_new("one")];
-        app.active = Some(0);
-        app.selected = 0;
-        app.mode = Mode::ProductAnnouncement;
-        app.product_announcement = Some(crate::app::state::ProductAnnouncementState {
-            version: "0.6.0".into(),
-            id: "keybinding-v2".into(),
-            title: "Keybinding syntax changed".into(),
-            body: "### Update\n- Body".into(),
-            scroll: 0,
-            preview: false,
-        });
-        app.config_diagnostic = Some(
-            "unsafe direct keybinding: keys.new_workspace = \"n\"\nunsafe direct keybinding: keys.new_tab = \"c\""
-                .into(),
-        );
-
-        let area = Rect::new(0, 0, 44, 20);
-        compute_view(&mut app, area);
-
-        let backend = TestBackend::new(area.width, area.height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(&app, frame)).unwrap();
-        let buffer = terminal.backend().buffer();
-
-        let popup = centered_popup_rect(
-            area,
-            PRODUCT_ANNOUNCEMENT_MODAL_SIZE.0,
-            PRODUCT_ANNOUNCEMENT_MODAL_SIZE.1,
-        )
-        .expect("announcement popup");
-        let title_row = popup.y + 1;
-        let row = buffer_row_text(buffer, Rect::new(0, title_row, area.width, 1), title_row);
-
-        assert!(row.contains("Keybinding syntax changed"));
-        assert!(!row.contains("config warning"));
     }
 
     #[test]

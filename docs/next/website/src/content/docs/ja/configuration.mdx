@@ -33,23 +33,6 @@ herdr --default-config > ~/.config/herdr/config.toml
 onboarding = false
 ```
 
-## アップデート
-
-Linux と macOS の直接インストールは、デフォルトで安定版アップデートチャンネルを使います。Windows ベータのインストールはデフォルトでプレビューを使い、安定版の Windows リリースが提供されるまで安定版には切り替えられません。
-
-```toml
-[update]
-channel = "stable"
-version_check = true
-manifest_check = true
-```
-
-`channel = "preview"` を設定すると、`herdr update` は現在の開発ブランチから手動公開されるプレビュービルドをインストールします。Homebrew、mise、Nix のインストールはプレビューチャンネルを無視し、それぞれのパッケージマネージャーでアップデートします。
-
-`version_check = false` を設定すると、新しい Herdr バージョンのバックグラウンドチェックを無効にします。手動の `herdr update` は引き続き設定済みチャンネルを使います。
-
-`manifest_check = false` を設定すると、リモートのエージェント検出マニフェストのバックグラウンドチェックを無効にします。Herdr はバンドルされたマニフェストとローカルオーバーライドを引き続き使います。
-
 ## 設定のリロード
 
 `config.toml` を編集した後、実行中のサーバーをリロードします:
@@ -121,7 +104,7 @@ auto_remote_handoff = false
 
 有効な場合、`herdr --remote` はあなたの `~/.ssh/config` と `/etc/ssh/ssh_config` を最初に include し、その後にフォールバックの `ServerAliveInterval` と `ServerAliveCountMax` の値を加えたプライベートな一時 SSH 設定を書き込みます。あなた自身の SSH キープアライブ設定が優先されます。Herdr が生成する設定を使わず素の `ssh` でブリッジを実行するには `manage_ssh_config = false` を設定してください。
 
-Unix では、`ssh_integration` により各 Herdr ペインの `PATH` の先頭に小さな `ssh` shim が置かれます。接続先だけを指定する対話的な `ssh TARGET` は通常の OpenSSH でフォアグラウンド認証を行い、互換性のあるリモート Herdr デーモンを検出または起動し、リモートの default セッションのシェルを現在のペインへ排他的に委譲します。リモート側には peer federation と remote presentation を備えた互換 Herdr が事前に必要です。セットアップ失敗時は警告して通常の SSH にフォールバックします。リモートコマンド、非対話/セッションなし、フォワーディング、トンネル、ローカルコマンドの意味を持つ接続は、元の引数のまま実際の `ssh` に渡されます。Herdr は `Host`、`Match`、`Include` を含む有効な SSH 設定にも同じ境界を適用し、統合を強制するために設定を上書きしません。
+Unix では、`ssh_integration` により各 Herdr ペインの `PATH` の先頭に小さな `ssh` shim が置かれます。接続先だけを指定する対話的な `ssh TARGET` は通常の OpenSSH でフォアグラウンド認証を行い、互換性のあるリモート Herdr デーモンを検出または起動し、リモートの default セッションのシェルを現在のペインへ排他的に委譲します。リモート側には peer federation と remote presentation を備えた互換性のある `peisongxiao/herdr` build が事前に必要で、Herdr はそれを provision しません。セットアップ失敗時は警告して通常の SSH にフォールバックします。リモートコマンド、非対話/セッションなし、フォワーディング、トンネル、ローカルコマンドの意味を持つ接続は、元の引数のまま実際の `ssh` に渡されます。Herdr は `Host`、`Match`、`Include` を含む有効な SSH 設定にも同じ境界を適用し、統合を強制するために設定を上書きしません。
 
 新しく作成される macOS の login-zsh ペインでは、デフォルトの `shell_mode = "auto"` を含め、プライベートな一回限りの起動フックを使います。元の `ZDOTDIR` と起動ファイルを復元したうえで、`path_helper` などのログイン初期化後、最初のプロンプトで shim を再び先頭に置き `rehash` を実行してから自身を削除します。ユーザーの alias と function は通常どおり優先され、`/usr/bin/ssh` のような絶対パスは shim を迂回します。既存のペインは再作成されるまで現在の環境を保ちます。
 

@@ -204,22 +204,6 @@ fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
         explain["visible_blocker"].as_bool().unwrap_or(false),
         explain["visible_working"].as_bool().unwrap_or(false)
     );
-    println!(
-        "cached_remote_version: {}",
-        explain["cached_remote_version"].as_str().unwrap_or("none")
-    );
-    println!(
-        "local_override_shadowing_remote: {}",
-        explain["local_override_shadowing_remote"]
-            .as_bool()
-            .unwrap_or(false)
-    );
-    if let Some(status) = explain["remote_update_status"].as_str() {
-        println!("remote_update_status: {status}");
-    }
-    if let Some(error) = explain["remote_update_error"].as_str() {
-        println!("remote_update_error: {error}");
-    }
     if let Some(evaluated_rules) = explain["evaluated_rules"]
         .as_array()
         .filter(|rules| !rules.is_empty())

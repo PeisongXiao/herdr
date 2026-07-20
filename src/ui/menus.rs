@@ -157,27 +157,6 @@ pub(super) fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: R
     let overlay_y = area.y + area.height.saturating_sub(1);
     let overlay_area = Rect::new(area.x, overlay_y, area.width, 1);
     render_bottom_bar(frame, overlay_area, line, app.palette.panel_bg);
-
-    if app.update_available.is_some() {
-        let status = Line::from(vec![Span::styled(
-            " update ready",
-            Style::default()
-                .fg(app.palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )]);
-        let width = 13u16.min(overlay_area.width);
-        let status_area = Rect::new(
-            overlay_area.x + overlay_area.width.saturating_sub(width),
-            overlay_area.y,
-            width,
-            overlay_area.height,
-        );
-        frame.render_widget(Clear, status_area);
-        frame.render_widget(
-            Paragraph::new(status).alignment(Alignment::Right),
-            status_area,
-        );
-    }
 }
 
 pub(super) fn render_global_launcher_menu(app: &AppState, frame: &mut Frame) {

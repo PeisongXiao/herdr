@@ -22,38 +22,13 @@ workspaces, tabs, panes. mouse-native: click, drag, split. every agent at a glan
 ## install
 
 ```bash
-curl -fsSL https://herdr.dev/install.sh | sh
-```
-
-on windows preview beta:
-
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
-```
-
-or install with homebrew:
-
-```bash
-brew install herdr
-```
-
-or install with mise:
-
-```bash
-mise use -g herdr
-```
-
-if mise reports `herdr not found in mise tool registry`, update mise and retry. older mise versions predate the herdr registry entry; `mise use -g github:ogulcancelik/herdr` works as a temporary fallback.
-
-or build the checkout locally on Linux or macOS x86_64/aarch64:
-
-```bash
+git clone https://github.com/peisongxiao/herdr
+cd herdr
+./install-local.sh --check
 ./install-local.sh
 ```
 
-the source installer verifies that Cargo, Rust, and the selected C compiler/linker can run, requires exactly Zig 0.15.2, then installs to `~/.local/bin/herdr` by default. rerun it after updating the checkout; an already-running server keeps using its old process until that session is restarted or handed off. see the [install docs](https://herdr.dev/docs/install/) for dependency checks and destination options.
-
-or download the stable Linux/macOS binary from [releases](https://github.com/ogulcancelik/herdr/releases). Native Windows binaries are preview-only beta builds.
+this fork is installed from source on Linux or macOS x86_64/aarch64. the installer verifies Cargo, Rust, the selected C compiler/linker, and exactly Zig 0.15.2, then atomically installs to `~/.local/bin/herdr` by default. it does not download release binaries, use update channels, check product announcements, or update itself. see the [install docs](https://herdr.dev/docs/install/) for dependency checks, destination options, and clean-install behavior.
 
 ## quick start
 
@@ -75,37 +50,20 @@ Press `ctrl+b q` to detach the client. The server and pane processes keep runnin
 
 **Copy.** Herdr copies pane text, not the sidebar. Drag-select inside a pane, double-click a word or token, or press `prefix+[` for keyboard copy mode. In copy mode, move with `h/j/k/l`, `w/b/e`, and `{`/`}`, start selection with `v` or Space, copy with `y` or Enter, and leave with `q` or Esc. In PuTTY and some SSH terminals, hold `Shift` while dragging to use the terminal's own selection, and `Shift` + right click to paste.
 
-**Update and restore.** `herdr update` installs a new binary, but a running server keeps using the old process until it is stopped or handed off. Stop the old server to use the new version. Stopping exits pane processes. Run `herdr server stop`, then run `herdr` again for the default session. For a named session, run `herdr session stop <name>`, then run `herdr session attach <name>` again. `herdr update --handoff` is experimental and tries to move live panes, including foreground processes such as dev servers, from the old server to the new one. With current official integrations installed, supported agent panes can restart from their native agent sessions after a server restart or update.
+**Source upgrades and restore.** Pull the desired revision and rerun `./install-local.sh`. A running server keeps using its old process until its session is stopped and restarted. Stopping exits pane processes. Run `herdr server stop`, then run `herdr` again for the default session. For a named session, run `herdr session stop <name>`, then run `herdr session attach <name>` again. With current official integrations installed, supported agent panes can restart from their native agent sessions after a server restart.
 
 **Keybindings.** Herdr uses explicit keybinding strings. `prefix+n` means press the configured prefix, then `n`. `ctrl+alt+n`, `cmd+k`, `alt+1`, and function-key chords are direct terminal-mode shortcuts and do not need the prefix. Plain direct printable keys such as `n` steal normal typing, so use `prefix+n` unless you intentionally want a modifier-gated direct binding.
 
 **Agent awareness.** The sidebar shows blocked, working, done, and idle states. Detection works with process names and terminal output by default. Official integrations can add native session identity for restore, semantic state reports, or both.
 
-## update
-
-Herdr notifies you when a new version is available. Run manually:
+## upgrade from source
 
 ```bash
-herdr update
+git pull --ff-only
+./install-local.sh
 ```
 
-`herdr update` is for installs managed by Herdr's own installer. Homebrew, mise, and Nix installs update through `brew upgrade herdr`, `mise upgrade herdr`, or your Nix workflow, then use the same stop-and-run-again flow if a session is still running the old server. Linux and macOS direct installs can opt into development preview builds with `herdr channel set preview` and return to stable with `herdr channel set stable`. Windows beta installs are preview-only for now. See [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the full update, restart, restore, and handoff matrix.
-
-Linux and macOS direct installs use the stable update channel by default. Windows beta installs default to preview. To test preview builds from `master` before the next stable release:
-
-```bash
-herdr channel set preview
-```
-
-To return Linux and macOS direct installs to stable:
-
-```bash
-herdr channel set stable
-```
-
-For direct installs, changing channels also checks that channel and installs its latest binary. If that update fails, run `herdr update` to retry from the configured channel.
-
-Preview is only for direct installs managed by Herdr's updater. Homebrew, mise, and Nix stay on stable and update through their package managers.
+there is no `herdr update` command or stable/preview channel in this fork. rerunning the installer replaces the binary only after a successful build. restart the default or named session when you are ready for its server to use the new build. see the [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the source upgrade and restore flow.
 
 ## how it compares
 
@@ -133,7 +91,7 @@ herdr
 ssh you@yourserver
 ```
 
-Herdr leaves host checks and authentication to normal OpenSSH, then automatically finds or starts the remote Herdr daemon, links the two servers, and presents a new remote shell in the pane you already have. The remote host must already have a compatible Herdr with peer federation and remote presentation support; this path does not install or upgrade it. If that requirement or managed setup fails, Herdr prints a warning and runs the original SSH command as ordinary unmanaged SSH instead. Explicit `herdr agent start --ssh` requests fail rather than falling back.
+Herdr leaves host checks and authentication to normal OpenSSH, then finds or starts the remote Herdr daemon, links the two servers, and presents a new remote shell in the pane you already have. The remote host must already have a compatible `peisongxiao/herdr` build with peer federation and remote presentation support; no remote path provisions, installs, or upgrades it. If that requirement or managed setup fails, Herdr prints a warning and runs the original SSH command as ordinary unmanaged SSH instead. Explicit `herdr agent start --ssh` requests fail rather than falling back.
 
 The remote pane is delegated, not mirrored: it appears in a workspace on exactly one machine. Ending the SSH connection, closing its owner pane, or stopping the owner Herdr server destroys the delegated pane and its process. To keep it on the remote host, run `herdr remote-handoff` inside the remote pane before disconnecting; Herdr moves only the pane containing your cursor into a new workspace on that host. Nested managed SSH repeats the same model for each hop, and handoff applies to the innermost pane. Moving an already presented peer agent requires an explicit `herdr agent attach peer::target --takeover`; unwind a deeper active remote hop before taking over its owner pane.
 
@@ -289,7 +247,7 @@ In-app settings cover theme, sound, and toast preferences. Herdr writes logs und
 ## docs
 
 - [quick start](https://herdr.dev/docs/quick-start/) — first session, panes, copy, and named sessions
-- [install](https://herdr.dev/docs/install/) — install, update, Homebrew, mise, and Nix
+- [install](https://herdr.dev/docs/install/) — source install, dependency checks, clean install, and source upgrades
 - [session state](https://herdr.dev/docs/session-state/) — detach, restart restore, agent restore, and live handoff
 - [configuration](https://herdr.dev/docs/configuration/) — keybindings, themes, notifications, environment variables
 - [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, cursor agent cli, github copilot cli, droid, kimi code cli, opencode, kilo code cli, hermes, mastracode, qodercli integrations
@@ -303,10 +261,9 @@ if you are an ai agent helping with this repository, read [`AGENTS.md`](./AGENTS
 ## development
 
 ```bash
-git clone https://github.com/ogulcancelik/herdr
+git clone https://github.com/peisongxiao/herdr
 cd herdr
-cargo build --release
-./target/release/herdr
+./install-local.sh
 
 just test        # unit tests
 just check       # formatting, tests, and maintenance checks

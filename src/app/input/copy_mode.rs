@@ -16,7 +16,6 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        self.state.update_dismissed = true;
         if self.state.is_prefix_key(key) {
             self.state.mode = Mode::Prefix;
             return;

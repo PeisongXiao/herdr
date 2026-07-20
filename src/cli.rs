@@ -98,7 +98,10 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "status" => status::run_status_command(&args[2..])?,
         "completion" | "completions" => completion::run_completion_command(&args[2..])?,
         "config" => run_config_command(&args[2..])?,
-        "channel" => run_channel_command(&args[2..])?,
+        "update" | "channel" => {
+            eprintln!("unknown command: {command}");
+            2
+        }
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
@@ -157,141 +160,6 @@ fn run_remote_handoff_command(args: &[String]) -> std::io::Result<i32> {
     }
     println!("remote pane handed off to a new workspace on this machine");
     Ok(0)
-}
-
-fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
-    match args.first().map(|arg| arg.as_str()) {
-        Some("set") => channel_set(&args[1..]),
-        Some("show") if args.len() == 1 => {
-            let config = crate::config::Config::load().config;
-            println!("{}", config.update.channel.as_str());
-            Ok(0)
-        }
-        Some("help" | "--help" | "-h") => {
-            print_channel_help();
-            Ok(0)
-        }
-        _ => {
-            print_channel_help();
-            Ok(2)
-        }
-    }
-}
-
-fn channel_set(args: &[String]) -> std::io::Result<i32> {
-    let Some(channel) = parse_channel_set_arg(args) else {
-        eprintln!("usage: herdr channel set <stable|preview>");
-        return Ok(2);
-    };
-
-    if let Some(reason) = channel_set_rejection(
-        channel,
-        crate::update::preview_channel_rejection_for_current_install(),
-    ) {
-        eprintln!("{reason}.");
-        return Ok(1);
-    }
-
-    let path = crate::config::config_path();
-    let content = if path.exists() {
-        std::fs::read_to_string(&path)?
-    } else {
-        String::new()
-    };
-    if let Err(err) = content.parse::<toml::Value>() {
-        eprintln!(
-            "config file at {} is invalid TOML: {err}. Fix it before changing the update channel.",
-            path.display()
-        );
-        return Ok(1);
-    }
-
-    let updated = crate::config::upsert_section_value(
-        &content,
-        "update",
-        "channel",
-        &format!("\"{channel}\""),
-    );
-    if let Err(err) = updated.parse::<toml::Value>() {
-        eprintln!(
-            "changing the update channel would make {} invalid TOML: {err}; leaving config unchanged",
-            path.display()
-        );
-        return Ok(1);
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, updated)?;
-    println!(
-        "Herdr update channel set to {channel} in {}.",
-        path.display()
-    );
-
-    match channel_set_install_action(
-        crate::update::package_manager_channel_update_guidance_for_current_install(),
-    ) {
-        ChannelSetInstallAction::PrintGuidance(guidance) => {
-            println!("{guidance}");
-            return Ok(0);
-        }
-        ChannelSetInstallAction::RunSelfUpdate => {}
-    }
-
-    if let Err(err) = crate::update::self_update(crate::update::SelfUpdateOptions::default()) {
-        eprintln!("update failed: {err}");
-        eprintln!("Run `herdr update` to retry.");
-        return Ok(1);
-    }
-
-    Ok(0)
-}
-
-fn parse_channel_set_arg(args: &[String]) -> Option<&str> {
-    let channel = args.first().map(|arg| arg.as_str())?;
-    if args.len() == 1 && matches!(channel, "stable" | "preview") {
-        Some(channel)
-    } else {
-        None
-    }
-}
-
-fn channel_set_rejection(
-    channel: &str,
-    install_rejection: Option<&'static str>,
-) -> Option<&'static str> {
-    if cfg!(windows) && channel == "stable" {
-        return Some(
-            "stable channel is not available on Windows yet; Windows builds are preview-only",
-        );
-    }
-
-    if channel == "preview" {
-        return install_rejection;
-    }
-
-    None
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChannelSetInstallAction {
-    RunSelfUpdate,
-    PrintGuidance(&'static str),
-}
-
-fn channel_set_install_action(
-    package_manager_guidance: Option<&'static str>,
-) -> ChannelSetInstallAction {
-    match package_manager_guidance {
-        Some(guidance) => ChannelSetInstallAction::PrintGuidance(guidance),
-        None => ChannelSetInstallAction::RunSelfUpdate,
-    }
-}
-
-fn print_channel_help() {
-    eprintln!("herdr channel commands:");
-    eprintln!("  herdr channel show                  print the configured update channel");
-    eprintln!("  herdr channel set <stable|preview>  choose the update channel");
 }
 
 fn run_config_command(args: &[String]) -> std::io::Result<i32> {
@@ -1716,68 +1584,6 @@ mod tests {
         assert_eq!(
             super::parse_session_delete_options(&["work".to_string(), "--discard".to_string(),]),
             Err(2)
-        );
-    }
-
-    #[test]
-    fn parses_channel_set_argument() {
-        assert_eq!(
-            super::parse_channel_set_arg(&["preview".to_string()]),
-            Some("preview")
-        );
-        assert_eq!(
-            super::parse_channel_set_arg(&["stable".to_string()]),
-            Some("stable")
-        );
-        assert_eq!(super::parse_channel_set_arg(&["nightly".to_string()]), None);
-        assert_eq!(
-            super::parse_channel_set_arg(&["preview".to_string(), "stable".to_string()]),
-            None
-        );
-    }
-
-    #[test]
-    fn channel_set_rejects_package_managed_preview_before_config_write() {
-        assert_eq!(
-            super::channel_set_rejection("preview", Some("no preview")),
-            Some("no preview")
-        );
-        assert_eq!(
-            super::channel_set_rejection("stable", Some("no preview")),
-            if cfg!(windows) {
-                Some(
-                    "stable channel is not available on Windows yet; Windows builds are preview-only",
-                )
-            } else {
-                None
-            }
-        );
-        assert_eq!(super::channel_set_rejection("preview", None), None);
-    }
-
-    #[test]
-    fn channel_set_rejects_stable_only_on_windows() {
-        assert_eq!(
-            super::channel_set_rejection("stable", None),
-            if cfg!(windows) {
-                Some(
-                    "stable channel is not available on Windows yet; Windows builds are preview-only",
-                )
-            } else {
-                None
-            }
-        );
-    }
-
-    #[test]
-    fn channel_set_skips_self_update_for_package_manager_guidance() {
-        assert_eq!(
-            super::channel_set_install_action(Some("use package manager")),
-            super::ChannelSetInstallAction::PrintGuidance("use package manager")
-        );
-        assert_eq!(
-            super::channel_set_install_action(None),
-            super::ChannelSetInstallAction::RunSelfUpdate
         );
     }
 

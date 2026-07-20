@@ -58,8 +58,6 @@ mod agent_resume;
 mod api;
 mod app;
 mod build_info;
-#[cfg(not(windows))]
-mod checksum;
 mod cli;
 mod client;
 mod config;
@@ -84,11 +82,9 @@ mod persist;
 mod platform;
 mod plugin_command;
 mod plugin_paths;
-mod product_announcements;
 mod protocol;
 mod pty;
 mod raw_input;
-mod release_notes;
 mod remote;
 mod remote_agent;
 #[cfg(unix)]
@@ -104,7 +100,7 @@ mod terminal_modes;
 mod terminal_notify;
 mod terminal_theme;
 mod ui;
-mod update;
+mod version;
 mod workspace;
 mod worktree;
 
@@ -152,17 +148,6 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Use "follow" to inherit the source pane/workspace, "home" for $HOME,
 # "current" for Herdr's process directory, or a fixed path such as "~/Projects".
 # new_cwd = "follow"
-
-[update]
-# Update channel used by background version checks and `herdr update`.
-# Use "stable" for normal releases or "preview" for opt-in preview builds.
-# channel = "stable"
-
-# Check herdr.dev for new Herdr versions in the background.
-# version_check = true
-
-# Check herdr.dev for remote agent-detection manifest updates in the background.
-# manifest_check = true
 
 [keys]
 # Prefix key to enter prefix mode (default: "ctrl+b")
@@ -529,32 +514,6 @@ fn main() -> io::Result<()> {
         return client::run_client();
     }
 
-    if args.get(1).map(|s| s.as_str()) == Some("update") {
-        let options = match update::parse_self_update_args(&args[2..]) {
-            Ok(options) => options,
-            Err(err) if err.starts_with("usage:") => {
-                eprintln!("{err}");
-                std::process::exit(0);
-            }
-            Err(err) => {
-                eprintln!("{err}");
-                eprintln!("usage: herdr update [--handoff]");
-                std::process::exit(2);
-            }
-        };
-        match update::self_update(options) {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                if e.starts_with("self-update is disabled") {
-                    eprintln!("{e}");
-                } else {
-                    eprintln!("update failed: {e}");
-                }
-                std::process::exit(1);
-            }
-        }
-    }
-
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("herdr — terminal workspace manager for AI coding agents");
         println!();
@@ -563,14 +522,11 @@ fn main() -> io::Result<()> {
         println!("       herdr --remote <ssh-target> [--session <name>]");
         println!("       herdr session attach <name>");
         println!("       herdr completion zsh");
-        println!("       herdr update [--handoff]");
-        println!("       herdr channel set <stable|preview>");
         println!("       herdr server stop");
         println!("       herdr server reload-config");
         println!("       herdr api <subcommand> ...");
         println!("       herdr completion <shell>");
         println!("       herdr config <subcommand> ...");
-        println!("       herdr channel <subcommand> ...");
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr worktree <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
@@ -593,15 +549,10 @@ fn main() -> io::Result<()> {
                 "herdr status [server|client]",
                 "Show local client and running server status",
             ),
-            ("herdr update", "Download and install the latest version"),
             ("herdr completion zsh", "Generate shell completions for zsh"),
             (
                 "herdr server stop",
                 "Stop the running server via the API socket",
-            ),
-            (
-                "herdr channel set <stable|preview>",
-                "Choose the stable or preview update channel",
             ),
             (
                 "herdr server reload-config",
@@ -610,10 +561,6 @@ fn main() -> io::Result<()> {
             (
                 "herdr config reset-keys",
                 "Back up config.toml and remove custom keybindings",
-            ),
-            (
-                "herdr channel <subcommand>",
-                "Manage the stable or preview update channel",
             ),
             (
                 "herdr api <subcommand>",
@@ -673,7 +620,7 @@ fn main() -> io::Result<()> {
         println!("  --remote <target>   Attach through SSH to a remote Herdr server");
         println!("  --remote-keybindings <local|server>");
         println!("                      Keybindings for --remote app attach (default: local)");
-        println!("  --handoff           Opt into live handoff for update or remote attach");
+        println!("  --handoff           Opt into live handoff for remote attach");
         println!("  --default-config    Print default configuration and exit");
         println!("  --version, -V       Print version and exit");
         println!("  --help, -h          Show this help");
@@ -719,10 +666,8 @@ fn main() -> io::Result<()> {
                 "server",
                 "client",
                 "remote-client-bridge",
-                "update",
                 "status",
                 "config",
-                "channel",
                 "workspace",
                 "worktree",
                 "ssh",
@@ -735,7 +680,7 @@ fn main() -> io::Result<()> {
         {
             eprintln!("unknown command: {arg}");
             eprintln!("run 'herdr --help' for usage");
-            std::process::exit(1);
+            std::process::exit(2);
         }
     }
 
@@ -818,10 +763,6 @@ fn main() -> io::Result<()> {
     let config = &loaded_config.config;
     let config_diagnostic = config::config_diagnostic_summary(&loaded_config.diagnostics);
     logging::startup("app");
-
-    // Background update check (non-blocking, best-effort)
-    // Only checks for newer versions and notifies the TUI.
-    // Skipped in --no-session mode (testing).
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -13,49 +13,6 @@ pub const MAX_TOAST_DELAY_SECONDS: u64 = 3600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum UpdateChannelConfig {
-    #[default]
-    Stable,
-    Preview,
-}
-
-impl UpdateChannelConfig {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stable => "stable",
-            Self::Preview => "preview",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(default)]
-pub struct UpdateConfig {
-    pub channel: UpdateChannelConfig,
-    pub version_check: bool,
-    pub manifest_check: bool,
-}
-
-impl Default for UpdateConfig {
-    fn default() -> Self {
-        Self {
-            channel: default_update_channel(),
-            version_check: true,
-            manifest_check: true,
-        }
-    }
-}
-
-fn default_update_channel() -> UpdateChannelConfig {
-    if cfg!(windows) {
-        UpdateChannelConfig::Preview
-    } else {
-        UpdateChannelConfig::Stable
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
-#[serde(rename_all = "lowercase")]
 pub enum ToastDelivery {
     #[default]
     Off,
@@ -291,7 +248,6 @@ pub struct Config {
     pub theme: ThemeConfig,
     pub terminal: TerminalConfig,
     pub session: SessionConfig,
-    pub update: UpdateConfig,
     pub keys: KeysConfig,
     pub ui: UiConfig,
     pub worktrees: WorktreesConfig,
@@ -1103,26 +1059,6 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn update_config_defaults_and_parses() {
-        let default_config = Config::default();
-        assert_eq!(default_config.update.channel, default_update_channel());
-        assert!(default_config.update.version_check);
-        assert!(default_config.update.manifest_check);
-
-        let toml = r#"
-[update]
-channel = "preview"
-version_check = false
-manifest_check = false
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.update.channel, UpdateChannelConfig::Preview);
-        assert_eq!(config.update.channel.as_str(), "preview");
-        assert!(!config.update.version_check);
-        assert!(!config.update.manifest_check);
-    }
 
     #[test]
     fn terminal_default_shell_defaults_empty_and_parses() {

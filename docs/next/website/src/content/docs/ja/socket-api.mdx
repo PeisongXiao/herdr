@@ -690,31 +690,26 @@ herdr wait agent-status w1:p1 --status blocked
 }
 ```
 
-`server.agent_manifests` は、ルールをリロードせずに、アクティブなエージェント検出マニフェストのソースとリモート更新の診断情報を返します:
+`server.agent_manifests` は、ルールをリロードせずに、アクティブな bundled/local エージェント検出マニフェストのソースを返します:
 
 ```json
 {
   "id": "req_1",
   "result": {
     "type": "agent_manifest_status",
-    "last_check_unix": 1781043522,
-    "last_result": "checked",
     "manifests": [
       {
         "agent": "cursor",
         "source": "/home/me/.config/herdr/agent-detection/cursor.toml",
         "source_kind": "local override",
-        "active_version": "2026.06.10.1",
-        "cached_remote_version": "2026.06.10.1",
-        "local_override_shadowing_remote": true,
-        "remote_update_result": "current"
+        "active_version": "2026.06.10.1"
       }
     ]
   }
 }
 ```
 
-`last_check_unix`、`last_result`、`active_version`、`cached_remote_version`、`remote_update_result`、`remote_update_error`、`remote_last_checked_unix`、`warning` のようなフィールドは、利用できないときは省略されます。`server.reload_agent_manifests` は、メモリ内のルールキャッシュをリロードした後、同じ `manifests` の項目形式を持つ `agent_manifest_reload` を返します。
+optional な `active_version` と `warning` は利用できないときに省略されます。`server.reload_agent_manifests` は、メモリ内のルールキャッシュをリロードした後、同じ `manifests` の項目形式を持つ `agent_manifest_reload` を返します。
 
 `agent.explain` は、サーバーのアクティブなマニフェストキャッシュを使って、対象ペインの検出スナップショットを実行中のサーバーで評価します:
 

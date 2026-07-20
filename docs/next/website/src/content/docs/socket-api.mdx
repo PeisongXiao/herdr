@@ -843,31 +843,26 @@ Successful responses look like this:
 }
 ```
 
-`server.agent_manifests` returns the active agent detection manifest sources and remote update diagnostics without reloading rules:
+`server.agent_manifests` returns the active bundled or local agent detection manifest sources without reloading rules:
 
 ```json
 {
   "id": "req_1",
   "result": {
     "type": "agent_manifest_status",
-    "last_check_unix": 1781043522,
-    "last_result": "checked",
     "manifests": [
       {
         "agent": "cursor",
         "source": "/home/me/.config/herdr/agent-detection/cursor.toml",
         "source_kind": "local override",
-        "active_version": "2026.06.10.1",
-        "cached_remote_version": "2026.06.10.1",
-        "local_override_shadowing_remote": true,
-        "remote_update_result": "current"
+        "active_version": "2026.06.10.1"
       }
     ]
   }
 }
 ```
 
-Fields such as `last_check_unix`, `last_result`, `active_version`, `cached_remote_version`, `remote_update_result`, `remote_update_error`, `remote_last_checked_unix`, and `warning` are omitted when not available. `server.reload_agent_manifests` returns `agent_manifest_reload` with the same `manifests` item shape after reloading the in-memory rule cache.
+The optional `active_version` and `warning` fields are omitted when not available. `server.reload_agent_manifests` returns `agent_manifest_reload` with the same `manifests` item shape after reloading the in-memory rule cache.
 
 `agent.explain` evaluates the target pane's detection snapshot in the running server using the server's active manifest cache:
 

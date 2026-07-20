@@ -1,21 +1,5 @@
 use super::*;
 
-fn remote_manifest(version: &str, state: &str, contains: &str) -> String {
-    format!(
-        r#"
-id = "codex"
-version = "{version}"
-min_engine_version = 1
-updated_at = "2026-06-10T12:00:00Z"
-
-[[rules]]
-id = "test"
-state = "{state}"
-contains = ["{contains}"]
-"#
-    )
-}
-
 fn local_manifest(state: &str, contains: &str) -> String {
     format!(
         r#"
@@ -42,42 +26,22 @@ id = "codex"
 fn with_manifest_dirs<T>(name: &str, f: impl FnOnce() -> T) -> T {
     let _guard = crate::config::test_config_env_lock().lock().unwrap();
     let old_config = std::env::var_os("XDG_CONFIG_HOME");
-    let old_state = std::env::var_os("XDG_STATE_HOME");
     let base = std::env::temp_dir().join(format!(
         "herdr-manifest-loader-{name}-{}",
         std::process::id()
     ));
     let config_dir = base.join("config");
-    let state_dir = base.join("state");
     let _ = std::fs::remove_dir_all(&base);
     std::env::set_var("XDG_CONFIG_HOME", &config_dir);
-    std::env::set_var("XDG_STATE_HOME", &state_dir);
     reload_manifests();
     let result = f();
     match old_config {
         Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
         None => std::env::remove_var("XDG_CONFIG_HOME"),
     }
-    match old_state {
-        Some(value) => std::env::set_var("XDG_STATE_HOME", value),
-        None => std::env::remove_var("XDG_STATE_HOME"),
-    }
     reload_manifests();
     let _ = std::fs::remove_dir_all(&base);
     result
-}
-
-fn write_remote_codex(content: &str) {
-    let path = crate::detect::manifest_update::remote_manifest_path(Agent::Codex);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, content).unwrap();
-    reload_manifests();
-}
-
-fn write_remote_codex_without_reload(content: &str) {
-    let path = crate::detect::manifest_update::remote_manifest_path(Agent::Codex);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, content).unwrap();
 }
 
 fn write_local_codex(content: &str) {
@@ -85,6 +49,12 @@ fn write_local_codex(content: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, content).unwrap();
     reload_manifests();
+}
+
+fn write_local_codex_without_reload(content: &str) {
+    let path = override_path(Agent::Codex).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
 }
 
 #[test]
@@ -154,114 +124,44 @@ line_regex = ["^exact line$"]
 }
 
 #[test]
-fn remote_manifest_loads_between_local_override_and_bundled() {
-    with_manifest_dirs("remote-source", || {
-        write_remote_codex(&remote_manifest("2026.06.10.5", "blocked", "remote-ready"));
-
-        let explain = explain(Agent::Codex, "remote-ready");
-
-        assert_eq!(explain.state, AgentState::Blocked);
-        assert!(matches!(
-            explain.source,
-            Some(ManifestSource::Remote { .. })
-        ));
-        assert_eq!(explain.manifest_version.as_deref(), Some("2026.06.10.5"));
-        assert_eq!(
-            explain.cached_remote_version.as_deref(),
-            Some("2026.06.10.5")
-        );
-    });
-}
-
-#[test]
-fn fallback_explain_preserves_active_manifest_version() {
-    with_manifest_dirs("fallback-version", || {
-        write_remote_codex(&remote_manifest("2026.06.10.5", "blocked", "remote-ready"));
-
-        let explain = explain(Agent::Codex, "ordinary prompt text");
-
-        assert_eq!(explain.state, AgentState::Idle);
-        assert_eq!(
-            explain.fallback_reason.as_deref(),
-            Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
-        );
-        assert_eq!(explain.manifest_version.as_deref(), Some("2026.06.10.5"));
-        assert!(matches!(
-            explain.source,
-            Some(ManifestSource::Remote { .. })
-        ));
-    });
-}
-
-#[test]
-fn older_cached_remote_manifest_does_not_shadow_newer_bundled_manifest() {
-    with_manifest_dirs("older-remote-bundled-fallback", || {
-        write_remote_codex(&remote_manifest("2026.06.10.0", "blocked", "remote-ready"));
-
-        let explain = explain(Agent::Codex, "remote-ready");
-
-        assert_eq!(explain.state, AgentState::Idle);
-        assert!(matches!(explain.source, Some(ManifestSource::Bundled)));
-        assert_eq!(
-            explain.cached_remote_version.as_deref(),
-            Some("2026.06.10.0")
-        );
-        assert!(explain
-            .warning
-            .as_deref()
-            .is_some_and(|warning| warning.contains("older than bundled")));
-    });
-}
-
-#[test]
-fn local_override_shadows_cached_remote_manifest() {
-    with_manifest_dirs("local-shadows-remote", || {
-        write_remote_codex(&remote_manifest("2026.06.10.5", "blocked", "remote-ready"));
+fn local_override_takes_precedence_over_bundled_manifest() {
+    with_manifest_dirs("local-source", || {
         write_local_codex(&local_manifest("idle", "local-ready"));
 
         let explain = explain(Agent::Codex, "local-ready");
 
         assert_eq!(explain.state, AgentState::Idle);
         assert!(matches!(explain.source, Some(ManifestSource::Override(_))));
-        assert!(explain.local_override_shadowing_remote);
-        assert_eq!(
-            explain.cached_remote_version.as_deref(),
-            Some("2026.06.10.5")
-        );
     });
 }
 
 #[test]
-fn invalid_local_override_falls_back_to_cached_remote_manifest() {
-    with_manifest_dirs("invalid-local-remote-fallback", || {
-        write_remote_codex(&remote_manifest("2026.06.10.5", "blocked", "remote-ready"));
+fn invalid_local_override_falls_back_to_bundled_manifest() {
+    with_manifest_dirs("invalid-local-bundled-fallback", || {
         write_local_codex("id = ");
 
-        let explain = explain(Agent::Codex, "remote-ready");
+        let explain = explain(Agent::Codex, "ordinary prompt text");
 
-        assert_eq!(explain.state, AgentState::Blocked);
-        assert!(matches!(
-            explain.source,
-            Some(ManifestSource::Remote { .. })
-        ));
+        assert_eq!(explain.state, AgentState::Idle);
+        assert!(matches!(explain.source, Some(ManifestSource::Bundled)));
         assert!(explain.warning.is_some());
     });
 }
 
 #[test]
-fn detection_uses_cached_manifest_until_explicit_reload() {
+fn detection_uses_cached_local_manifest_until_explicit_reload() {
     with_manifest_dirs("cache-boundary", || {
-        write_remote_codex(&remote_manifest("2026.06.10.5", "blocked", "cached-ready"));
+        write_local_codex(&local_manifest("blocked", "cached-ready"));
 
         let cached = explain(Agent::Codex, "cached-ready");
         assert_eq!(cached.state, AgentState::Blocked);
-        assert!(matches!(cached.source, Some(ManifestSource::Remote { .. })));
+        assert!(matches!(cached.source, Some(ManifestSource::Override(_))));
         assert_eq!(
             cached.matched_rule.as_ref().map(|rule| rule.id.as_str()),
             Some("test")
         );
 
-        write_remote_codex_without_reload(&remote_manifest("2026.06.10.6", "working", "new-ready"));
+        write_local_codex_without_reload(&local_manifest("working", "new-ready"));
 
         let unchanged = explain(Agent::Codex, "new-ready");
         assert_eq!(unchanged.state, AgentState::Idle);
@@ -269,19 +169,12 @@ fn detection_uses_cached_manifest_until_explicit_reload() {
             unchanged.fallback_reason.as_deref(),
             Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
         );
-        assert_eq!(
-            unchanged.cached_remote_version.as_deref(),
-            Some("2026.06.10.5")
-        );
 
         reload_manifests();
 
         let reloaded = explain(Agent::Codex, "new-ready");
         assert_eq!(reloaded.state, AgentState::Working);
-        assert_eq!(
-            reloaded.cached_remote_version.as_deref(),
-            Some("2026.06.10.6")
-        );
+        assert!(matches!(reloaded.source, Some(ManifestSource::Override(_))));
         assert_eq!(
             reloaded.matched_rule.as_ref().map(|rule| rule.id.as_str()),
             Some("test")
@@ -298,6 +191,25 @@ fn all_bundled_manifests_parse_and_validate() {
             agent_label(agent)
         );
     }
+}
+
+#[test]
+fn manifest_validation_rejects_newer_engine_version() {
+    let manifest = format!(
+        r#"
+id = "codex"
+version = "1"
+min_engine_version = {}
+
+[[rules]]
+id = "idle"
+state = "idle"
+contains = ["ready"]
+"#,
+        MANIFEST_ENGINE_VERSION + 1
+    );
+
+    assert!(parse_manifest(&manifest).is_err());
 }
 
 #[test]

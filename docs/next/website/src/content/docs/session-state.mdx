@@ -1,6 +1,6 @@
 ---
 title: Session state and restore
-description: Understand what Herdr keeps live, restores after restart, replays from history, resumes through agent integrations, and hands off during updates.
+description: Understand what Herdr keeps live, restores after restart, replays from history, and resumes through agent integrations.
 ---
 
 Herdr has several state paths. They solve different problems.
@@ -11,8 +11,8 @@ Herdr has several state paths. They solve different problems.
 | --- | --- | --- | --- | --- |
 | Detach and reattach | Yes | Yes | Yes, from the live terminal | Yes, because the process never stopped |
 | Server restart | No | Yes | Only with pane screen history | Only with native agent session restore |
-| Update without `--handoff` | Compatible servers keep running; restart-required servers may need stop/restart | Yes after restart | Only with pane screen history | Only with native agent session restore |
-| Update with `--handoff` | Best effort for supported running servers | Yes | Yes, from the live terminal if handoff succeeds | Yes, because the process keeps running if handoff succeeds |
+
+Rerunning `./install-local.sh` replaces the installed binary but does not replace a server process that is already running. Its panes keep their current behavior until you stop and restart that default or named session; the normal server-restart row then applies.
 
 These persistence guarantees apply to panes owned by their current Herdr session. A pane delegated through managed `ssh` or `agent start --ssh` has a stricter lifecycle: SSH disconnect, owner-pane closure, or owner-server stop terminates the remote pane and process. Run `herdr remote-handoff` inside that pane first to return it to a new workspace on its host.
 
@@ -91,7 +91,7 @@ If native agent session restore applies to a pane, Herdr resumes the agent sessi
 
 ## Live handoff
 
-Live handoff is for update and remote attach flows that need to replace a running Herdr server. It asks the old server to transfer live panes to the new server, so pane processes can keep running across the server replacement.
+Live handoff is available to remote attach when it needs to replace a running Herdr server. It asks the old server to transfer live panes to the new server, so pane processes can keep running across the server replacement.
 
 This is different from snapshot restore, pane history replay, and native agent session restore. Handoff tries to keep the current processes alive. The others reconstruct state after the old server has already stopped.
 
@@ -100,10 +100,7 @@ It is also different from `herdr remote-handoff`. That cursor-only command moves
 Live handoff is experimental and opt-in:
 
 ```bash
-herdr update --handoff
 herdr --remote workbox --handoff
 ```
 
-Plain `herdr update` and plain `herdr --remote workbox` use the normal restart/stop flow by default.
-
-`herdr update --handoff` only applies to installs managed by Herdr's own updater. Homebrew, mise, and Nix installs are updated through their package managers, so `herdr update` is disabled there and cannot perform live handoff.
+Plain `herdr --remote workbox` uses the normal restart/stop flow by default. This fork has no updater-driven handoff; source upgrades use `./install-local.sh` and an explicit session restart.

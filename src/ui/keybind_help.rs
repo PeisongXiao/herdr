@@ -8,13 +8,17 @@ use ratatui::{
     Frame,
 };
 
-use super::release_notes::release_notes_close_button_rect;
-use super::scrollbar::{release_notes_scrollbar_rect, render_scrollbar};
+use super::scrollbar::{overlay_scrollbar_rect, render_scrollbar};
 use super::widgets::{
-    modal_stack_areas, panel_contrast_fg, render_action_button, render_modal_header,
-    render_modal_shell,
+    action_button_width, modal_stack_areas, panel_contrast_fg, render_action_button,
+    render_modal_header, render_modal_shell,
 };
 use crate::app::AppState;
+
+pub(crate) fn keybind_help_close_button_rect(area: Rect) -> Rect {
+    let width = action_button_width(Some("esc"), "close");
+    Rect::new(area.x + area.width.saturating_sub(width), area.y, width, 1)
+}
 
 pub(super) type HelpEntry = (String, Cow<'static, str>);
 pub(super) type HelpGroup = (&'static str, Vec<HelpEntry>);
@@ -238,7 +242,7 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
     render_modal_header(frame, header_rows[0], "keybinds", &app.palette);
     render_action_button(
         frame,
-        release_notes_close_button_rect(header_rows[0]),
+        keybind_help_close_button_rect(header_rows[0]),
         Some("esc"),
         "close",
         Style::default()
@@ -260,7 +264,7 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         max_offset_from_bottom: app.keybind_help_max_scroll() as usize,
         viewport_rows: body_area.height.max(1) as usize,
     };
-    let track = release_notes_scrollbar_rect(body_area, metrics);
+    let track = overlay_scrollbar_rect(body_area, metrics);
     let text_area = track
         .map(|_| {
             Rect::new(

@@ -1,80 +1,17 @@
 ---
 title: Install Herdr
-description: Install, update, and verify Herdr on Linux, macOS, and Windows beta.
+description: Build, install, upgrade, and verify this Herdr fork from source.
 ---
 
-Herdr ships stable binaries for Linux and macOS. Native Windows support is preview-only beta.
-
-## Install
-
-On Linux or macOS, run:
-
-```bash
-curl -fsSL https://herdr.dev/install.sh | sh
-```
-
-On Windows preview beta, install the preview channel:
-
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
-```
-
-The installer downloads the right release binary for your platform and places it on your PATH. The Windows installer defaults to preview, writes that channel to Herdr's config, uses versioned install folders, and updates a `current` junction, so updates do not need to overwrite a running `herdr.exe`.
-
-## Install with Homebrew
-
-If you already use Homebrew:
-
-```bash
-brew install herdr
-```
-
-## Install with mise
-
-If you already use mise:
-
-```bash
-mise use -g herdr
-```
-
-If mise reports `herdr not found in mise tool registry`, update mise and retry. Older mise versions predate the Herdr registry entry; `mise use -g github:ogulcancelik/herdr` works as a temporary fallback.
-
-## Install with Nix
-
-If you already use Nix, Herdr provides a flake that builds Herdr from source:
-
-```bash
-nix run github:ogulcancelik/herdr/v0.x.y
-nix build github:ogulcancelik/herdr/v0.x.y
-nix profile install github:ogulcancelik/herdr/v0.x.y
-```
-
-Replace `v0.x.y` with the latest release tag. You can omit the tag to track `master`, but release tags are recommended for normal installs.
-
-The flake also exposes a development shell:
-
-```bash
-nix develop github:ogulcancelik/herdr
-```
-
-Update through the same Nix workflow you used to install Herdr. For a profile install, list your profile entries and upgrade the Herdr entry:
-
-```bash
-nix profile list
-nix profile upgrade <index-or-name>
-```
-
-If Herdr is an input in your own flake, update that input and rebuild your system, Home Manager, or development environment:
-
-```bash
-nix flake update herdr
-```
+This fork is installed from source on Linux or macOS x86_64/aarch64. It does not publish or consume Herdr release channels, download release binaries, check for product announcements, or update itself.
 
 ## Install from source
 
-From a Herdr checkout, use the local installer:
+Clone `peisongxiao/herdr`, then use the local installer from that checkout:
 
 ```bash
+git clone https://github.com/peisongxiao/herdr
+cd herdr
 ./install-local.sh --check
 ./install-local.sh
 ./install-local.sh --clean-install
@@ -82,37 +19,13 @@ From a Herdr checkout, use the local installer:
 
 The script supports Linux and macOS on x86_64 and aarch64. It requires Bash, usable `cargo` and `rustc` commands, exactly Zig `0.15.2`, and a working C compiler/linker. It uses `CC` when set; otherwise it selects the first available command from `cc`, `clang`, and `gcc`. It reports each missing or unusable build tool explicitly but does not run a package manager for you. Set `ZIG=/path/to/zig` when the required Zig is not the default `zig` on `PATH`. Cross-target Cargo builds are rejected because the installer only installs a native binary from the checkout.
 
-`--check` runs `cargo --version` and `rustc --version`, compiles and links a minimal C program with the selected compiler, validates the exact Zig version, and reports the platform, resolved Zig executable, isolated build cache, and destination without building Herdr. The default is a locked release build installed atomically to `$HOME/.local/bin/herdr`. Build artifacts use a checkout-specific directory under `${XDG_CACHE_HOME:-$HOME/.cache}/herdr/install-local`, preventing artifacts produced from another checkout path or a Docker bind mount from contributing stale native-library paths. An explicit `CARGO_TARGET_DIR` overrides that cache. Use `--prefix DIR` (or `PREFIX`) to change the install prefix, `--bin-dir DIR` to choose the binary directory directly, and `--debug` for a debug build. `--clean-install` is an explicitly destructive factory reset for the selected profile: release removes `herdr`, while `--debug` removes `herdr-dev`. The flag itself authorizes the reset. It stages the candidate first, stops detected default and named-session servers, quarantines and removes that profile's configuration/state trees including all sessions and remote recovery tickets, then installs the candidate. It refuses to run inside Herdr because stopping the owning server would interrupt installation. Deleting recovery tickets can strand hidden remote processes. External agent/MCP/SSH configuration, projects, the opposite profile, and build caches are not removed. The script warns when the destination is not on `PATH`; direct SSH federation still discovers the default `~/.local/bin/herdr` location.
+`--check` runs `cargo --version` and `rustc --version`, compiles and links a minimal C program with the selected compiler, validates the exact Zig version, and reports the platform, resolved Zig executable, isolated build cache, and destination without building Herdr. The default is a locked release build installed atomically to `$HOME/.local/bin/herdr`. Build artifacts use a checkout-specific directory under `${XDG_CACHE_HOME:-$HOME/.cache}/herdr/install-local`, preventing artifacts produced from another checkout path or a Docker bind mount from contributing stale native-library paths. An explicit `CARGO_TARGET_DIR` overrides that cache. Use `--prefix DIR` (or `PREFIX`) to change the install prefix, `--bin-dir DIR` to choose the binary directory directly, and `--debug` for a debug build.
 
-To upgrade a source install, update the checkout and rerun the script. Replacing the file does not replace an already-running Herdr server process: restart that session or perform a supported live handoff before expecting it to use the new build. Agent integrations are separate and are not installed or upgraded by `install-local.sh`.
+After the binary is atomically installed, the script removes obsolete updater data for the selected release or debug profile: `release-notes.json` from the config directory, plus `product-announcements.json` and the old `agent-detection` cache from the state directory. A failed build or binary replacement leaves those files untouched. Local detection overrides under the config directory's `agent-detection/` remain intact.
 
-## Download manually
+`--clean-install` is an explicitly destructive factory reset for the selected profile: release removes `herdr`, while `--debug` removes `herdr-dev`. The flag itself authorizes the reset. It stages the candidate first, stops detected default and named-session servers, quarantines and removes that profile's configuration/state trees including all sessions and remote recovery tickets, then installs the candidate. It refuses to run inside Herdr because stopping the owning server would interrupt installation. Deleting recovery tickets can strand hidden remote processes. External agent/MCP/SSH configuration, projects, the opposite profile, and build caches are not removed. The script warns when the destination is not on `PATH`; direct SSH federation still discovers the default `~/.local/bin/herdr` location.
 
-You can also download a binary from [GitHub releases](https://github.com/ogulcancelik/herdr/releases).
-
-Choose the asset that matches your system:
-
-| System | Asset |
-| --- | --- |
-| Linux x86_64 | `herdr-linux-x86_64` |
-| Linux aarch64 | `herdr-linux-aarch64` |
-| macOS Intel | `herdr-macos-x86_64` |
-| macOS Apple silicon | `herdr-macos-aarch64` |
-
-On Linux or macOS, make it executable and move it somewhere on your PATH.
-
-```bash
-chmod +x herdr-linux-x86_64
-mv herdr-linux-x86_64 ~/.local/bin/herdr
-```
-
-### Windows beta downloads
-
-Windows binaries are published only on preview releases while native Windows support is in beta. Use the preview installer above for normal testing, or download the Windows asset from a preview GitHub prerelease:
-
-| System | Asset |
-| --- | --- |
-| Windows x86_64 beta | `herdr-windows-x86_64.exe` |
+Agent integrations are separate and are not installed or upgraded by `install-local.sh`.
 
 ## Verify
 
@@ -124,44 +37,17 @@ herdr
 
 If your shell cannot find `herdr`, restart the terminal or check that the install directory is on your PATH.
 
-## Update
+## Upgrade from source
 
-Herdr checks for new releases and notifies you in the app. You can update manually:
-
-```bash
-herdr update
-```
-
-`herdr update` is for installs managed by Herdr's own installer. Homebrew, mise, and Nix installs are updated through those package managers instead.
-
-On Linux and macOS, Herdr uses the stable update channel by default. To opt into preview builds from `master`, set the channel:
+Pull the desired revision in the checkout and rerun the installer:
 
 ```bash
-herdr channel set preview
+git pull --ff-only
+./install-local.sh
 ```
 
-Switch Linux and macOS direct installs back to stable the same way:
-
-```bash
-herdr channel set stable
-```
-
-For direct installs, changing channels also checks that channel and installs its latest binary. If that update fails, run `herdr update` to retry from the configured channel.
-
-Preview builds are manually published GitHub prereleases from the current development branch. They are useful when you want fixes before the next stable release, but they can regress. Homebrew, mise, and Nix installs do not use the preview channel.
-
-Windows beta builds are preview-only for now. `herdr channel set stable` is rejected on Windows until stable Windows releases are available.
-
-By default, `herdr update` installs the new binary and leaves compatible running sessions alone. If an update changes Herdr's client/server protocol, Herdr asks whether to stop the old server after installing. Stop the old server to use the new version. Stopping exits pane processes. For the default session, run `herdr server stop`, then run `herdr` again. For a named session, run `herdr session stop <name>`, then run `herdr session attach <name>` again.
-
-To opt into experimental live server handoff for supported running sessions, run:
-
-```bash
-herdr update --handoff
-```
-
-Live handoff does not apply to Homebrew, mise, or Nix package-manager updates. For those installs, update with the package manager, then restart that Herdr session when you are ready to use the new server. If a running session still uses the old server, stop it with `herdr server stop` or `herdr session stop <name>`, then run Herdr again.
+There is no `herdr update` command or stable/preview channel in this fork. Replacing the binary does not replace an already-running server process. Stop and restart the default or named session when you are ready for it to use the new build.
 
 ## Requirements
 
-Stable Herdr releases support Linux and macOS. Native Windows builds are preview-only beta releases; see [Windows beta](/docs/windows-beta/) for supported workflows and known limitations.
+The source installer supports Linux and macOS on x86_64 and aarch64.

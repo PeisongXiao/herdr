@@ -17,12 +17,7 @@ herdr --remote workbox --remote-keybindings server
 herdr --remote workbox --handoff
 herdr --no-session            # 单进程逃生舱
 herdr --default-config        # 打印默认配置
-herdr update                  # 从配置的通道下载并安装
-herdr update --handoff        # 对受支持的运行中服务器启用实时交接
 herdr completion zsh          # 生成 zsh 补全脚本
-herdr channel show            # 打印 stable 或 preview
-herdr channel set preview     # 启用预览构建
-herdr channel set stable      # 把 Linux/macOS 直接安装切回稳定版
 herdr --version               # 打印版本
 ```
 
@@ -85,11 +80,10 @@ herdr server ensure [--json]
 herdr server stop
 herdr server reload-config
 herdr server agent-manifests [--json]
-herdr server update-agent-manifests [--json]
 herdr server reload-agent-manifests
 ```
 
-`herdr server` 显式运行无界面服务器,适合被监管或服务式的部署。`ensure` 只在服务器尚未运行时启动后台服务器。`server stop` 会在即将终止远程展示窗格时警告;需要保留时先在窗格内运行 `herdr remote-handoff`,或启用 `[remote] auto_remote_handoff` 让停止时自动交还所有委派窗格。`reload-config` 在不重启窗格的情况下应用可重载设置。`agent-manifests` 显示生效的智能体检测清单来源、缓存的远程版本和最近的远程更新结果。`update-agent-manifests` 立即拉取远程清单更新,重载到运行中的服务器,并打印更新后的清单状态;要原始状态响应就加 `--json`。`reload-agent-manifests` 在编辑本地覆盖后,把智能体检测清单重载到运行中的服务器。
+`herdr server` 显式运行无界面服务器,适合被监管或服务式的部署。`ensure` 只在服务器尚未运行时启动后台服务器。`server stop` 会在即将终止远程展示窗格时警告;需要保留时先在窗格内运行 `herdr remote-handoff`,或启用 `[remote] auto_remote_handoff` 让停止时自动交还所有委派窗格。`reload-config` 在不重启窗格的情况下应用可重载设置。`agent-manifests` 显示生效的 bundled/local 智能体检测清单来源与警告;要原始状态响应就加 `--json`。`reload-agent-manifests` 在编辑本地覆盖后,把清单重载到运行中的服务器。
 
 ## 通知
 
@@ -257,9 +251,9 @@ herdr remote-handoff
 
 `agent read` 读取解析出的终端流。`agent send` 向该流写入字面文本。`agent get`、`agent focus`、`agent wait` 和 `agent attach` 要求解析出的终端具有智能体身份。`agent rename` 可以赋予这个身份。
 
-`agent explain` 请求运行中的服务器对屏幕检测所用的同一份底部缓冲区检测快照进行分类,因此实时输出反映服务器生效的清单缓存。因为它使用 `agent.explain` socket 方法,升级 Herdr 后,请先重启或交接到更新后的服务器,再使用实时 explain。用 `--file PATH --agent LABEL` 可以改为在本地解释一份保存的样本。默认输出显示智能体、最终状态、清单来源和版本、匹配的规则及其区域证据,以及任何回退、跳过或警告原因。加 `--verbose` 可以看到可见证据标志、缓存的远程版本、本地覆盖的遮蔽情况、远程更新状态,以及带匹配器和区域证据的完整已评估规则列表。提交问题报告或写测试时加 `--json`。
+`agent explain` 请求运行中的服务器对屏幕检测所用的同一份底部缓冲区检测快照进行分类,因此实时输出反映服务器生效的清单缓存。因为它使用 `agent.explain` socket 方法,升级 Herdr 后,请先重启或交接到更新后的服务器,再使用实时 explain。用 `--file PATH --agent LABEL` 可以改为在本地解释一份保存的样本。默认输出显示智能体、最终状态、清单来源和版本、匹配的规则及其区域证据,以及任何回退、跳过或警告原因。加 `--verbose` 可以看到可见证据标志,以及带匹配器和区域证据的完整已评估规则列表。提交问题报告或写测试时加 `--json`。
 
-`agent start --ssh TARGET` 仅支持 Unix。它在远程 `PATH` 和已知用户/系统、Homebrew、mise、Nix 路径中寻找 Herdr,必要时启动兼容守护进程,然后在远程启动智能体并把窗格委派到本地工作区;不会引导、安装或更新远程二进制。`--agent AGENT` 选择要准备的官方集成,省略时尝试识别 `argv[0]`;用 `--no-remote-integration` 跳过准备。默认显式选择远程 `default` 会话,只有 `--ssh-session NAME` 选择命名会话,继承或 SSH 接受的 Herdr 路由变量不能改变它。连接选项放进 SSH 配置;CLI 与服务器都会在托管 SSH 前拒绝改变交互语义的有效配置。
+`agent start --ssh TARGET` 仅支持 Unix,并要求远程主机已经安装兼容的 `peisongxiao/herdr` build。它在远程 `PATH` 或 `~/.local/bin/herdr` 中寻找二进制,启动其 daemon,然后在远程启动智能体并把窗格委派到本地工作区;不会 provision、安装或更新远程二进制。`--agent AGENT` 选择要准备的官方集成,省略时尝试识别 `argv[0]`;用 `--no-remote-integration` 跳过准备。默认显式选择远程 `default` 会话,只有 `--ssh-session NAME` 选择命名会话,继承或 SSH 接受的 Herdr 路由变量不能改变它。连接选项放进 SSH 配置;CLI 与服务器都会在托管 SSH 前拒绝改变交互语义的有效配置。
 
 委派窗格只有一个展示所有者,且在本地展示期间会从远程工作区移除。关闭所有者窗格、停止其 Herdr 服务器或丢失 SSH 会终止远程窗格与智能体;它不会恢复成 shell 或等待以后重连。需要继续时先在窗格内运行 `herdr remote-handoff`,把它放回远程主机的新工作区。
 

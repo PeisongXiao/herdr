@@ -25,10 +25,8 @@ pub(super) fn command() -> Command {
                     .help("Print version and exit"),
             )
             .subcommand(completion_command())
-            .subcommand(update_command())
             .subcommand(status_command())
             .subcommand(config_command())
-            .subcommand(channel_command())
             .subcommand(server_command())
             .subcommand(api_command())
             .subcommand(workspace_command())
@@ -87,12 +85,6 @@ fn completion_command() -> Command {
         )
 }
 
-fn update_command() -> Command {
-    Command::new("update")
-        .about("Download and install the latest version")
-        .arg(flag("handoff").help("Try live handoff after installing"))
-}
-
 fn status_command() -> Command {
     Command::new("status")
         .about("Show local client and running server status")
@@ -115,20 +107,6 @@ fn config_command() -> Command {
         .subcommand(Command::new("reset-keys").about("Reset custom keybindings"))
 }
 
-fn channel_command() -> Command {
-    Command::new("channel")
-        .about("Manage stable and preview update channels")
-        .subcommand(Command::new("show").about("Print the configured update channel"))
-        .subcommand(
-            Command::new("set").about("Choose the update channel").arg(
-                Arg::new("channel")
-                    .value_name("CHANNEL")
-                    .required(true)
-                    .value_parser(["stable", "preview"]),
-            ),
-        )
-}
-
 fn server_command() -> Command {
     Command::new("server")
         .about("Run or control the headless server")
@@ -142,11 +120,6 @@ fn server_command() -> Command {
         .subcommand(
             Command::new("agent-manifests")
                 .about("Show active agent detection manifests")
-                .arg(json_flag()),
-        )
-        .subcommand(
-            Command::new("update-agent-manifests")
-                .about("Fetch and reload agent detection manifests")
                 .arg(json_flag()),
         )
         .subcommand(

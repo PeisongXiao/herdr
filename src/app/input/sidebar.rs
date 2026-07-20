@@ -198,11 +198,6 @@ impl AppState {
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
         let mut labels = vec!["settings", "keybinds", "reload config"];
-        if self.update_available.is_some() {
-            labels.push("update ready");
-        } else if self.latest_release_notes_available {
-            labels.push("what's new");
-        }
         labels.push("detach");
         labels
     }
@@ -574,32 +569,6 @@ mod tests {
     }
 
     #[test]
-    fn update_pending_menu_surfaces_update_ready_entry() {
-        let mut app = app_for_mouse_test();
-        app.state.update_available = Some("0.3.2".into());
-        app.state.latest_release_notes_available = true;
-
-        let launcher = app.state.global_launcher_rect();
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            launcher.x,
-            launcher.y,
-        ));
-
-        assert_eq!(
-            app.state.global_menu_labels(),
-            vec![
-                "settings",
-                "keybinds",
-                "reload config",
-                "update ready",
-                "detach"
-            ]
-        );
-        assert!(!app.state.should_quit);
-    }
-
-    #[test]
     fn persistence_mode_menu_surfaces_detach_action() {
         let mut app = app_for_mouse_test();
         app.state.detach_exits = false;
@@ -626,23 +595,6 @@ mod tests {
         assert!(app.state.detach_requested);
         assert!(!app.state.should_quit);
         assert_ne!(app.state.mode, Mode::GlobalMenu);
-    }
-
-    #[test]
-    fn whats_new_remains_in_menu_for_latest_installed_release_notes() {
-        let mut app = app_for_mouse_test();
-        app.state.latest_release_notes_available = true;
-
-        assert_eq!(
-            app.state.global_menu_labels(),
-            vec![
-                "settings",
-                "keybinds",
-                "reload config",
-                "what's new",
-                "detach"
-            ]
-        );
     }
 
     #[test]

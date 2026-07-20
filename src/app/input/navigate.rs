@@ -59,7 +59,6 @@ impl App {
 
     pub(crate) fn handle_prefix_key(&mut self, raw_key: TerminalKey) {
         let key = raw_key.as_key_event();
-        self.state.update_dismissed = true;
 
         if self.state.is_prefix_key(raw_key) {
             if self.state.copy_mode_pane_is_focused() {
@@ -122,7 +121,6 @@ impl App {
 
     pub(crate) fn handle_navigate_key(&mut self, raw_key: TerminalKey) {
         let key = raw_key.as_key_event();
-        self.state.update_dismissed = true;
 
         if key.code == KeyCode::Esc || self.state.is_prefix_key(raw_key) {
             leave_navigate_mode(&mut self.state);
@@ -1253,7 +1251,6 @@ pub(super) fn api_pane_direction(direction: NavDirection) -> crate::api::schema:
 #[cfg(test)]
 pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     let mut terminal_runtimes = TerminalRuntimeRegistry::new();
-    state.update_dismissed = true;
     let terminal_key = TerminalKey::from(key);
 
     if state.is_prefix_key(terminal_key) || key.code == KeyCode::Esc {
