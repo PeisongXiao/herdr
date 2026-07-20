@@ -245,7 +245,7 @@ plain pane `ssh` bridge 随前台 attach 结束。wrapper 每三秒续租一次 
 auto_remote_handoff = true
 ```
 
-parking 前,Herdr transactionally 保存 private recovery ticket,其中包含准确 workspace、tab、pane 与 layout position。session restore 不启动 shell,而是在该 slot 创建 non-interactive restoring panel。claim 成功时原位替换,绝不会 fallback 到 active tab。
+parking 前,Herdr transactionally 保存 private recovery ticket,其中包含准确 workspace、tab、pane 与 layout position。session restore 不启动 shell,而是在该 slot 创建 non-interactive restoring panel。claim 成功时原位替换,绝不会 fallback 到 active tab。即使之后关闭 `auto_remote_handoff`,已有 ticket 仍会在启动时自动协调;该设置只控制之后的正常停止是否创建新 ticket。
 
 每个 terminal 独立恢复。从该 attempt 被 admit 起,Herdr 使用 bounded backoff 重试 120 秒。失败后只有对应 panel 进入 **Timed out** 并通知一次,等待 Retry 或下次启动。Close 会丢弃本地 ticket;远端无法确认终止时,仍存活的 hidden terminal 会成为可发现 orphan:
 
@@ -255,7 +255,7 @@ herdr remote-resume --peer workbox
 herdr remote-resume --list     # 只显示 pending 窗格,不执行取回
 ```
 
-后续 managed SSH connection 或 client attach 到 owning remote server 时会显示 orphan review。**Retain** 保持隐藏并在下次再次提醒,**Terminate** 终止,**Promote** 将其显示到当前 review 所在 session。remote machine/server stop 会销毁 PTY;恢复后 Herdr 报告 ended,不会伪造 replacement shell。普通 `session delete` 在有 ticket 时拒绝,`--force` 报告丢弃数与可能的 orphan 数。
+后续 managed SSH connection 或 client attach 到 owning remote server 时会显示 orphan review。**Retain** 保持隐藏并在下次再次提醒,**Terminate** 终止,**Promote** 将其显示到当前 review 所在 session。remote machine/server stop 销毁 PTY 后,如果经过认证的 host 确认 parked terminal 已消失,Herdr 会删除 recovery ticket、通知一次结束状态,并用 local shell 修复保留的 slot。transport、认证或 response 格式失败不会删除 ticket,各 terminal 仍可独立重试。普通 `session delete` 在有 ticket 时拒绝,`--force` 报告丢弃数与可能的 orphan 数。
 
 ## 直接终端附加
 

@@ -127,7 +127,7 @@ Unix では、`ssh_integration` により各 Herdr ペインの `PATH` の先頭
 
 この設定は `manage_ssh_config` とは独立しています。ペイン SSH 統合は独自の一時 OpenSSH control connection を使い、`manage_ssh_config` は `herdr --remote` だけを制御します。無効化するには `ssh_integration = false`、一回だけ迂回するには `HERDR_SSH_BYPASS=1 ssh TARGET` を使います。対応形式、リモート Herdr の検出、peer link の境界は[永続化とリモートアクセス](/ja/docs/persistence-remote/)を参照してください。
 
-`auto_remote_handoff = true` にすると、正常停止したサーバーは委譲されたリモートペインを終了する代わりにホストへ引き渡し、次回のサーバー起動時に元のワークスペースとタブへ再取得します。自動再取得は非対話的なので、鍵またはエージェントによる SSH 認証が必要です。パスワードや MFA が必要なホストは記録されたまま残り、`herdr remote-resume` で再取得できます。正常ではない停止（クラッシュ、電源喪失、ネットワーク障害）では従来どおりリモートペインは終了し、1 ホップを超える入れ子の SSH チェーンは引き渡しされません。ライフサイクル全体は[永続化とリモートアクセス](/ja/docs/persistence-remote/#automatic-handoff-on-server-stop)を参照してください。
+`auto_remote_handoff = true` にすると、正常停止したサーバーは委譲されたリモートペインを終了する代わりにホストへ引き渡し、次回のサーバー起動時に元のワークスペースとタブへ再取得します。この設定は新しい handoff の作成だけを制御し、既存の recovery ticket は後で設定を無効にしても起動時に必ず照合されます。自動再取得は非対話的なので、鍵またはエージェントによる SSH 認証が必要です。パスワードや MFA が必要なホストは記録されたまま残り、`herdr remote-resume` で再取得できます。正常ではない停止（クラッシュ、電源喪失、ネットワーク障害）では従来どおりリモートペインは終了し、1 ホップを超える入れ子の SSH チェーンは引き渡しされません。ライフサイクル全体は[永続化とリモートアクセス](/ja/docs/persistence-remote/#automatic-handoff-on-server-stop)を参照してください。
 
 この実験的な動作は Settings > Experiments > automatic remote handoff からも切り替えられます。トグルは `[remote].auto_remote_handoff` を更新します。
 

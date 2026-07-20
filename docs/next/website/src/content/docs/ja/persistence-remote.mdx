@@ -245,7 +245,7 @@ plain pane `ssh` bridge は foreground attach の終了時に解放され、wrap
 auto_remote_handoff = true
 ```
 
-parking 前に Herdr は exact workspace、tab、pane、layout position を含む private recovery ticket を transactionally 保存します。session restore は shell を起動せず、その slot に non-interactive restoring panel を作ります。claim 成功時は同じ pane を置き換え、active tab へ fallback しません。
+parking 前に Herdr は exact workspace、tab、pane、layout position を含む private recovery ticket を transactionally 保存します。session restore は shell を起動せず、その slot に non-interactive restoring panel を作ります。claim 成功時は同じ pane を置き換え、active tab へ fallback しません。既存 ticket は `auto_remote_handoff` を後で無効にしても起動時に必ず照合され、この設定は次回の正常停止で新しい ticket を作るかだけを制御します。
 
 各 terminal は独立して restore されます。admit された attempt から 120 秒間 bounded backoff で retry し、失敗した panel だけが **Timed out** になって 1 回通知します。Retry または次回起動まで ticket と panel は残ります。Close で local ticket を破棄し、remote termination を確認できなければ hidden orphan として後から発見できます:
 
@@ -255,7 +255,7 @@ herdr remote-resume --peer workbox
 herdr remote-resume --list     # 再取得せずに pending ペインを表示
 ```
 
-後の managed SSH connection または owning remote server への client attach が orphan を見つけると review を表示します。**Retain** は hidden のまま次回も通知、**Terminate** は終了、**Promote** は review を表示している session に見えるようにします。remote machine/server stop は PTY を失うため、復帰後は replacement shell を作らず ended と報告します。通常の `session delete` は ticket があれば拒否し、`--force` は破棄数と orphan 候補数を報告します。
+後の managed SSH connection または owning remote server への client attach が orphan を見つけると review を表示します。**Retain** は hidden のまま次回も通知、**Terminate** は終了、**Promote** は review を表示している session に見えるようにします。remote machine/server stop で PTY が失われ、認証済み host が parked terminal の消失を確認した場合、Herdr は recovery ticket を削除して終了を一度通知し、予約 slot を local shell で修復します。transport、認証、response 形式の失敗では ticket を削除せず、terminal ごとに独立して再試行できます。通常の `session delete` は ticket があれば拒否し、`--force` は破棄数と orphan 候補数を報告します。
 
 ## ダイレクトターミナルアタッチ
 

@@ -301,7 +301,7 @@ herdr remote-resume [--list] [--peer PEER_ID]
 
 peer は Herdr ペイン内の `ssh TARGET` または `agent start --ssh` が作る runtime link です。`list` は生成 id、`health` は reachability refresh、`unregister` はその peer の managed bridge をすべて削除します。plain SSH bridge は foreground attach とともに閉じ、wrapper が 15 秒 lease を 3 秒ごとに renew するため crash も回収されます。peer は persistent pairing ではなく、server restart 後は再接続が必要です。active/pending presentation、peer link、background cleanup は server live handoff を block します。
 
-`herdr remote-resume` は、前回の正常停止が `[remote] auto_remote_handoff` でホストへ引き渡したリモートペインの再取得を再試行します。サーバー起動時の自動再取得は非対話的なので、パスワードや MFA が必要なホストのペインは pending のまま残り、`remote-resume` が通常の `ssh` ログインのようにフォアグラウンドで認証して再取得します。`--list` は pending のペインと最後のエラーを再取得せずに表示し、`--peer` は再試行を 1 peer に限定します。
+`herdr remote-resume` は、前回の正常停止が `[remote] auto_remote_handoff` でホストへ引き渡したリモートペイン向けの対話認証および再試行用 fallback です。現在の設定値にかかわらず、既存 ticket はサーバー起動時に自動で再取得を試みます。自動再取得は非対話的なので、パスワードや MFA が必要なホストのペインは pending のまま残り、`remote-resume` が通常の `ssh` ログインのようにフォアグラウンドで認証して再取得します。`--list` は pending のペインと最後のエラーを再取得せずに表示し、`--peer` は再試行を 1 peer に限定します。host が終了済みと確認した terminal は pending list から自動的に削除されます。
 
 ## Wait
 

@@ -127,7 +127,7 @@ auto_remote_handoff = false
 
 此设置与 `manage_ssh_config` 相互独立: 窗格 SSH 集成始终使用自己的临时 OpenSSH 控制连接,而 `manage_ssh_config` 只控制 `herdr --remote`。设置 `ssh_integration = false` 可完全保留原始窗格 `ssh`,单次绕过则使用 `HERDR_SSH_BYPASS=1 ssh TARGET`。支持的命令形式、远程发现和 peer 链接边界见[持久化与远程访问](/zh-cn/docs/persistence-remote/)。
 
-设置 `auto_remote_handoff = true` 后,服务器正常停止时会把委派中的远程窗格交还给所在主机而不是终止它,并在下次服务器启动时把它重新取回原来的工作区与标签页。自动取回是非交互式的,因此需要基于密钥或 agent 的 SSH 认证;需要密码或 MFA 的主机会保留在记录中,可用 `herdr remote-resume` 手动取回。非正常停止(崩溃、断电、网络故障)仍会终止远程窗格,且超过一跳的嵌套 SSH 链不会被交还。完整生命周期见[持久化与远程访问](/zh-cn/docs/persistence-remote/#automatic-handoff-on-server-stop)。
+设置 `auto_remote_handoff = true` 后,服务器正常停止时会把委派中的远程窗格交还给所在主机而不是终止它,并在下次服务器启动时把它重新取回原来的工作区与标签页。该设置只控制新 handoff 的创建;即使之后关闭设置,已有 recovery ticket 也会在启动时自动协调。自动取回是非交互式的,因此需要基于密钥或 agent 的 SSH 认证;需要密码或 MFA 的主机会保留在记录中,可用 `herdr remote-resume` 手动取回。非正常停止(崩溃、断电、网络故障)仍会终止远程窗格,且超过一跳的嵌套 SSH 链不会被交还。完整生命周期见[持久化与远程访问](/zh-cn/docs/persistence-remote/#automatic-handoff-on-server-stop)。
 
 也可以在 Settings > Experiments > automatic remote handoff 中切换这一实验性行为。该开关会更新 `[remote].auto_remote_handoff`。
 

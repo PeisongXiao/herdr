@@ -305,6 +305,7 @@ docker exec -e HOME=/state/home "$RUN-origin" ssh remote-live true || \
 
 origin server ensure || fail_with_remote_diagnostics "origin server did not start"
 start_agent remote-live restore-live
+start_agent remote-live restore-live-gone
 start_agent remote-park restore-park-a
 start_agent remote-park restore-park-b
 start_agent remote-down restore-down-a
@@ -312,6 +313,7 @@ start_agent remote-down restore-down-b
 
 for heartbeat in \
   "$TMP/nodes/remote-live/heartbeat-restore-live" \
+  "$TMP/nodes/remote-live/heartbeat-restore-live-gone" \
   "$TMP/nodes/remote-park/heartbeat-restore-park-a" \
   "$TMP/nodes/remote-park/heartbeat-restore-park-b" \
   "$TMP/nodes/remote-down/heartbeat-restore-down-a" \
@@ -321,8 +323,8 @@ for heartbeat in \
 done
 
 origin server stop
-wait_until 30 parked_count_matches remote-live 1 || \
-  fail_with_remote_diagnostics "live remote did not park exactly one terminal"
+wait_until 30 parked_count_matches remote-live 2 || \
+  fail_with_remote_diagnostics "live remote did not park exactly two terminals"
 wait_until 30 parked_count_matches remote-park 2 || \
   fail_with_remote_diagnostics "partition remote did not park exactly two terminals"
 wait_until 30 parked_count_matches remote-down 2 || \
@@ -341,9 +343,37 @@ while IFS= read -r park_id; do
     fail "parked terminal leaked into ordinary agent listing"
 done < <(parked_ids <<<"$parked_dump")
 
+remote_live_ip=$(remote_ip remote-live)
+mapfile -t remote_live_park_ids < <(parked_json remote-live | parked_ids)
+(( ${#remote_live_park_ids[@]} == 2 )) || fail "live remote park ids were not recorded"
+remote_live_terminal_ids=$(parked_json remote-live | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+ids = set()
+def walk(value):
+    if isinstance(value, dict):
+        terminal_id = value.get("terminal_id")
+        if isinstance(terminal_id, str):
+            ids.add(terminal_id)
+        for child in value.values():
+            walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            walk(child)
+walk(data)
+print("\n".join(sorted(ids)))
+')
+docker network disconnect "$REMOTE_NET" "$RUN-remote-live"
 docker network disconnect "$REMOTE_NET" "$RUN-remote-park"
 docker stop "$RUN-remote-down" >/dev/null
+cat >"$TMP/nodes/origin/config/herdr-dev/config.toml" <<'EOF'
+[remote]
+auto_remote_handoff = false
+EOF
 origin server ensure
+remote remote-live terminal parked terminate "${remote_live_park_ids[0]}"
+docker network connect --ip "$remote_live_ip" --alias remote-live \
+  "$REMOTE_NET" "$RUN-remote-live"
 
 sleep "$WAIT_SECONDS"
 wait_until 15 independent_timeouts_reported || {
@@ -353,6 +383,12 @@ wait_until 15 independent_timeouts_reported || {
 }
 [[ $(parked_count remote-live) -eq 0 ]] || \
   fail "reachable terminal was not restored"
+pending=$(origin remote-resume --list 2>&1 || true)
+while IFS= read -r terminal_id; do
+  [[ -z "$terminal_id" ]] && continue
+  grep -Fq "$terminal_id" <<<"$pending" && \
+    fail "authoritatively ended or restored live ticket remained pending: $terminal_id"
+done <<<"$remote_live_terminal_ids"
 
 origin server stop
 if docker exec "$RUN-origin" /usr/local/bin/herdr session delete "$SESSION" >/dev/null 2>&1; then

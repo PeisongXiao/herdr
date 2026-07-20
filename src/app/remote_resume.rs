@@ -1,5 +1,6 @@
 //! Automatic remote-pane handoff on graceful server stop and re-acquire on
-//! the next server start, driven by `[remote] auto_remote_handoff`.
+//! the next server start. `[remote] auto_remote_handoff` controls creation of
+//! new handoffs; already-persisted recovery tickets are always reconciled.
 //!
 //! On stop, every owned remote presentation is handed back to its host with
 //! `terminal.delegate.handoff` and a durable resume record is persisted per
@@ -137,6 +138,15 @@ fn persist_remote_handoff_disposition(
         RemoteHandoffDisposition::Confirmed => store.mark_parked(remote_terminal_id).map(|_| ()),
         RemoteHandoffDisposition::Ambiguous => Ok(()),
         RemoteHandoffDisposition::DefinitiveFailure => store.remove(remote_terminal_id).map(|_| ()),
+    }
+}
+
+fn normalize_parked_terminate_result(
+    result: Result<(), crate::remote_agent::RemoteParkedError>,
+) -> Result<(), String> {
+    match result {
+        Ok(()) | Err(crate::remote_agent::RemoteParkedError::Gone { .. }) => Ok(()),
+        Err(err) => Err(err.to_string()),
     }
 }
 
@@ -456,9 +466,6 @@ impl App {
     /// Admission is shared with other remote API work and capped at eight;
     /// every terminal receives its own enqueue-stamped 120-second deadline.
     pub(crate) fn spawn_remote_reacquires(&mut self) {
-        if !self.auto_remote_handoff {
-            return;
-        }
         let mut store = match ResumeStore::for_active_session() {
             Ok(store) => store,
             Err(err) => {
@@ -554,6 +561,14 @@ impl App {
                     },
                 );
                 for record in records {
+                    if params.managed_control_path.is_some()
+                        && self.remote_restore_attempt_active(&record.remote_terminal_id)
+                    {
+                        self.cancel_remote_restore_attempt(
+                            &record.remote_terminal_id,
+                            "remote restoration was superseded",
+                        );
+                    }
                     if let Err(error) = self.enqueue_remote_restore(
                         record.clone(),
                         params.managed_control_path.clone(),
@@ -665,14 +680,7 @@ impl App {
         managed_control_path: Option<String>,
         request_token: Option<u64>,
     ) -> Result<(), String> {
-        if self
-            .remote_restore_workers
-            .contains_key(&record.remote_terminal_id)
-            || self
-                .remote_restore_queue
-                .iter()
-                .any(|queued| queued.record.remote_terminal_id == record.remote_terminal_id)
-        {
+        if self.remote_restore_attempt_active(&record.remote_terminal_id) {
             return Err("remote terminal restoration is already running".into());
         }
         let credentials = load_remote_restore_credentials(&record)?;
@@ -699,6 +707,67 @@ impl App {
         });
         self.pump_remote_restore_queue();
         Ok(())
+    }
+
+    fn remote_restore_attempt_active(&self, remote_terminal_id: &str) -> bool {
+        self.remote_restore_workers.contains_key(remote_terminal_id)
+            || self
+                .remote_restore_queue
+                .iter()
+                .any(|queued| queued.record.remote_terminal_id == remote_terminal_id)
+    }
+
+    fn cancel_remote_restore_attempt(&mut self, remote_terminal_id: &str, message: &str) {
+        if let Some(worker) = self.remote_restore_workers.remove(remote_terminal_id) {
+            worker.cancelled.store(true, Ordering::Release);
+        }
+        let mut cancelled_request_tokens = Vec::new();
+        self.remote_restore_queue.retain(|queued| {
+            if queued.record.remote_terminal_id == remote_terminal_id {
+                if let Some(token) = queued.request_token {
+                    cancelled_request_tokens.push((token, queued.record.peer_id.clone()));
+                }
+                false
+            } else {
+                true
+            }
+        });
+        for (token, peer_id) in cancelled_request_tokens {
+            self.record_remote_resume_outcome(
+                token,
+                RemoteResumeOutcome {
+                    remote_terminal_id: remote_terminal_id.to_string(),
+                    peer_id,
+                    error: Some(message.to_string()),
+                },
+            );
+            self.finish_remote_resume_request_if_ready(token);
+        }
+    }
+
+    fn finish_remote_restore_generation(
+        &mut self,
+        remote_terminal_id: &str,
+        generation: u64,
+    ) -> bool {
+        if generation == 0 {
+            return true;
+        }
+        let current = self
+            .remote_restore_workers
+            .get(remote_terminal_id)
+            .is_some_and(|worker| {
+                worker.generation == generation
+                    && self
+                        .state
+                        .remote_restore_panels
+                        .get(&worker.pane_id)
+                        .is_some_and(|panel| panel.generation == generation)
+            });
+        if current {
+            self.remote_restore_workers.remove(remote_terminal_id);
+        }
+        current
     }
 
     fn ensure_remote_restore_panel(
@@ -934,25 +1003,16 @@ impl App {
         &mut self,
         results: Vec<RemoteReacquireResult>,
     ) -> Vec<(Option<u64>, RemoteResumeOutcome)> {
-        let mut store = ResumeStore::for_active_session().ok();
+        let (mut store, store_open_error) = match ResumeStore::for_active_session() {
+            Ok(store) => (Some(store), None),
+            Err(err) => (None, Some(err.to_string())),
+        };
         let mut outcomes = Vec::with_capacity(results.len());
         for mut finished in results {
             let record = finished.record.clone();
             let request_token = finished.request_token;
-            let current = finished.generation == 0
-                || self
-                    .remote_restore_workers
-                    .get(&record.remote_terminal_id)
-                    .is_some_and(|worker| {
-                        worker.generation == finished.generation
-                            && self
-                                .state
-                                .remote_restore_panels
-                                .get(&worker.pane_id)
-                                .is_some_and(|panel| panel.generation == finished.generation)
-                    });
-            self.remote_restore_workers
-                .remove(&record.remote_terminal_id);
+            let current = self
+                .finish_remote_restore_generation(&record.remote_terminal_id, finished.generation);
             if !current {
                 if let Ok(remote) = &mut finished.result {
                     crate::remote_agent::rollback_reacquire(remote);
@@ -1057,22 +1117,42 @@ impl App {
                     }
                 }
                 Err(RemoteReacquireFailure::Ended { message }) => {
-                    if let Some(store) = store.as_mut() {
-                        let _ =
-                            store.set_last_error(&record.remote_terminal_id, Some(message.clone()));
-                    }
-                    if let Some(panel) = self
-                        .panel_pane_for_record(&record)
-                        .and_then(|pane_id| self.state.remote_restore_panels.get_mut(&pane_id))
-                    {
-                        panel.status = crate::app::state::RemoteRestoreStatus::Ended {
-                            message: message.clone(),
-                        };
-                    }
+                    let cleanup_error = match store.as_mut() {
+                        Some(store) => self
+                            .finalize_gone_remote_restore(store, &record, message)
+                            .err(),
+                        None => Some(format!(
+                            "could not open the remote resume store: {}",
+                            store_open_error
+                                .as_deref()
+                                .unwrap_or("unknown persistence error")
+                        )),
+                    };
+                    let outcome_message = if let Some(cleanup_error) = cleanup_error {
+                        let cleanup_pending =
+                            format!("{message}; local cleanup is pending: {cleanup_error}");
+                        if let Some(store) = store.as_mut() {
+                            let _ = store.set_last_error(
+                                &record.remote_terminal_id,
+                                Some(cleanup_pending.clone()),
+                            );
+                        }
+                        if let Some(panel) = self
+                            .panel_pane_for_record(&record)
+                            .and_then(|pane_id| self.state.remote_restore_panels.get_mut(&pane_id))
+                        {
+                            panel.status = crate::app::state::RemoteRestoreStatus::Retryable {
+                                message: cleanup_pending.clone(),
+                            };
+                        }
+                        cleanup_pending
+                    } else {
+                        message.clone()
+                    };
                     RemoteResumeOutcome {
                         remote_terminal_id: record.remote_terminal_id.clone(),
                         peer_id: record.peer_id.clone(),
-                        error: Some(message.clone()),
+                        error: Some(outcome_message),
                     }
                 }
             };
@@ -1280,6 +1360,116 @@ impl App {
         }
     }
 
+    /// Converge local state after the authenticated remote host confirms that
+    /// the parked terminal no longer exists. The ticket is removed first so a
+    /// crash leaves an unclaimed reservation that startup can safely repair.
+    fn finalize_gone_remote_restore(
+        &mut self,
+        store: &mut ResumeStore,
+        record: &ResumeRecord,
+        message: &str,
+    ) -> Result<(), String> {
+        let pane_id = self.panel_pane_for_record(record).or_else(|| {
+            self.exact_reservation_target(record)
+                .ok()
+                .and_then(|(_, _, pane_id)| {
+                    self.find_pane(pane_id)
+                        .is_some_and(|(_, pane)| pane.remote_restore_reservation)
+                        .then_some(pane_id)
+                })
+        });
+        store
+            .remove(&record.remote_terminal_id)
+            .map_err(|err| format!("could not remove the ended recovery ticket: {err}"))?;
+        self.state
+            .remote_restore_panels
+            .retain(|_, panel| panel.remote_terminal_id != record.remote_terminal_id);
+
+        let Some(pane_id) = pane_id else {
+            self.notify_remote_restore_ended(None, record, message);
+            return Ok(());
+        };
+        self.set_remote_restore_reservation(pane_id, false);
+        if self.respawn_shell_for_launch_pane(pane_id) {
+            self.state.mark_session_dirty();
+            self.schedule_session_save();
+        } else {
+            self.set_remote_restore_reservation(pane_id, true);
+            self.state.remote_restore_panels.insert(
+                pane_id,
+                crate::app::state::RemoteRestorePanelState {
+                    remote_terminal_id: record.remote_terminal_id.clone(),
+                    peer_id: record.peer_id.clone(),
+                    status: crate::app::state::RemoteRestoreStatus::Ended {
+                        message: format!("{message}; the local pane could not be restored"),
+                    },
+                    generation: 0,
+                    timeout_notified: false,
+                },
+            );
+        }
+        self.notify_remote_restore_ended(Some(pane_id), record, message);
+        Ok(())
+    }
+
+    fn notify_remote_restore_ended(
+        &mut self,
+        pane_id: Option<crate::layout::PaneId>,
+        record: &ResumeRecord,
+        message: &str,
+    ) {
+        let workspace_id = pane_id.and_then(|pane_id| {
+            self.state
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.pane_state(pane_id).is_some())
+                .map(|ws_idx| self.public_workspace_id(ws_idx))
+        });
+        let previous_toast = self.state.toast.clone();
+        let context = format!(
+            "{} on {} ended: {}",
+            record.remote_terminal_id, record.peer_id, message
+        );
+        let merged_context = self
+            .state
+            .toast
+            .as_ref()
+            .filter(|toast| toast.title == "remote session ended")
+            .map(|toast| format!("{}\n{}", toast.context, context))
+            .unwrap_or(context);
+        self.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::NeedsAttention,
+            title: "remote session ended".into(),
+            context: merged_context,
+            position: None,
+            target: workspace_id.zip(pane_id).map(|(workspace_id, pane_id)| {
+                crate::app::state::ToastTarget {
+                    workspace_id,
+                    pane_id,
+                }
+            }),
+        });
+        self.sync_toast_deadline(previous_toast);
+        if self.local_terminal_notifications {
+            let body = format!("{} on {}", record.remote_terminal_id, record.peer_id);
+            match self.state.toast_config.delivery {
+                crate::config::ToastDelivery::Terminal => {
+                    let _ = crate::terminal_notify::show_notification(
+                        "remote session ended",
+                        Some(&body),
+                    );
+                }
+                crate::config::ToastDelivery::System => {
+                    let _ = crate::platform::show_desktop_notification(
+                        "remote session ended",
+                        Some(&body),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn notify_remote_restore_timeout(
         &mut self,
         pane_id: crate::layout::PaneId,
@@ -1438,31 +1628,7 @@ impl App {
                 .remove(remote_terminal_id)
                 .map_err(|err| format!("could not discard restore record: {err}"))?;
         }
-        if let Some(worker) = self.remote_restore_workers.remove(remote_terminal_id) {
-            worker.cancelled.store(true, Ordering::Release);
-        }
-        let mut cancelled_request_tokens = Vec::new();
-        self.remote_restore_queue.retain(|queued| {
-            if queued.record.remote_terminal_id == remote_terminal_id {
-                if let Some(token) = queued.request_token {
-                    cancelled_request_tokens.push((token, queued.record.peer_id.clone()));
-                }
-                false
-            } else {
-                true
-            }
-        });
-        for (token, peer_id) in cancelled_request_tokens {
-            self.record_remote_resume_outcome(
-                token,
-                RemoteResumeOutcome {
-                    remote_terminal_id: remote_terminal_id.to_string(),
-                    peer_id,
-                    error: Some("remote restoration was cancelled".into()),
-                },
-            );
-            self.finish_remote_resume_request_if_ready(token);
-        }
+        self.cancel_remote_restore_attempt(remote_terminal_id, "remote restoration was cancelled");
         self.state
             .remote_restore_panels
             .retain(|_, panel| panel.remote_terminal_id != remote_terminal_id);
@@ -1674,16 +1840,16 @@ impl App {
         if let Err(err) = std::thread::Builder::new()
             .name("herdr-remote-terminate".into())
             .spawn(move || {
-                let result = crate::remote_agent::terminate_parked_until(
-                    &record,
-                    None,
-                    &credentials.park_id,
-                    &credentials.origin_id,
-                    &credentials.discovery_token,
-                    Instant::now() + Duration::from_secs(15),
-                    &cancelled,
-                )
-                .map_err(|err| err.to_string());
+                let result =
+                    normalize_parked_terminate_result(crate::remote_agent::terminate_parked_until(
+                        &record,
+                        None,
+                        &credentials.park_id,
+                        &credentials.origin_id,
+                        &credentials.discovery_token,
+                        Instant::now() + Duration::from_secs(15),
+                        &cancelled,
+                    ));
                 let _ = event_tx.blocking_send(AppEvent::RemoteParkedTerminateFinished(
                     RemoteParkedTerminateResult {
                         remote_terminal_id: terminal_id,
@@ -2437,6 +2603,108 @@ mod tests {
         let started = Instant::now();
         assert!(sleep_with_cancellation(Duration::from_secs(30), &cancelled));
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn gone_reacquire_consumes_ticket_and_repairs_reserved_pane() {
+        let (mut app, pane_id) = recovery_test_app();
+        let record = recovery_test_record(&app, pane_id, 0);
+        let unique = crate::remote_resume::generate_recovery_id().expect("test id");
+        let path = std::env::temp_dir().join(format!(
+            "herdr-gone-reacquire-{}-{unique}.json",
+            std::process::id()
+        ));
+        let token: SecretToken =
+            serde_json::from_str("\"test-resume-token\"").expect("resume token");
+        let mut store = ResumeStore::open(path.clone()).expect("test resume store");
+        store
+            .upsert_parking(record.clone(), "park-test".into(), token)
+            .expect("parking record");
+        store
+            .mark_parked(&record.remote_terminal_id)
+            .expect("parked record");
+        app.state.remote_restore_panels.insert(
+            pane_id,
+            crate::app::state::RemoteRestorePanelState {
+                remote_terminal_id: record.remote_terminal_id.clone(),
+                peer_id: record.peer_id.clone(),
+                status: crate::app::state::RemoteRestoreStatus::Restoring,
+                generation: 1,
+                timeout_notified: false,
+            },
+        );
+
+        app.finalize_gone_remote_restore(&mut store, &record, "remote terminal ended")
+            .expect("finalize gone terminal");
+
+        assert!(store.find(&record.remote_terminal_id).is_none());
+        assert!(!app.state.remote_restore_panels.contains_key(&pane_id));
+        assert!(
+            !app.state.workspaces[0].tabs[0]
+                .panes
+                .get(&pane_id)
+                .expect("root pane")
+                .remote_restore_reservation
+        );
+        let terminal_id = &app.state.workspaces[0].tabs[0]
+            .panes
+            .get(&pane_id)
+            .expect("root pane")
+            .attached_terminal_id;
+        assert!(app.terminal_runtimes.get(terminal_id).is_some());
+        app.state.assert_invariants_for_test();
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn gone_parked_termination_is_idempotent() {
+        let gone = Err(crate::remote_agent::RemoteParkedError::Gone {
+            code: "terminal_parked_not_found".into(),
+            message: "already ended".into(),
+        });
+        assert!(normalize_parked_terminate_result(gone).is_ok());
+
+        let unauthorized = Err(crate::remote_agent::RemoteParkedError::Unauthorized {
+            code: "terminal_parked_unauthorized".into(),
+            message: "denied".into(),
+        });
+        assert!(normalize_parked_terminate_result(unauthorized).is_err());
+    }
+
+    #[test]
+    fn stale_superseded_generation_does_not_remove_current_worker() {
+        let (mut app, pane_id) = recovery_test_app();
+        let record = recovery_test_record(&app, pane_id, 0);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        app.state.remote_restore_panels.insert(
+            pane_id,
+            crate::app::state::RemoteRestorePanelState {
+                remote_terminal_id: record.remote_terminal_id.clone(),
+                peer_id: record.peer_id,
+                status: crate::app::state::RemoteRestoreStatus::Restoring,
+                generation: 2,
+                timeout_notified: false,
+            },
+        );
+        app.remote_restore_workers.insert(
+            record.remote_terminal_id.clone(),
+            RemoteRestoreWorker {
+                generation: 2,
+                pane_id,
+                cancelled,
+            },
+        );
+
+        assert!(!app.finish_remote_restore_generation(&record.remote_terminal_id, 1));
+        assert!(app
+            .remote_restore_workers
+            .contains_key(&record.remote_terminal_id));
+        assert!(app.finish_remote_restore_generation(&record.remote_terminal_id, 2));
+        assert!(!app
+            .remote_restore_workers
+            .contains_key(&record.remote_terminal_id));
     }
 
     #[test]

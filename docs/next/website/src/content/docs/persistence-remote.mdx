@@ -256,7 +256,7 @@ Delegated remote panes normally die with their owner. With `[remote] auto_remote
 auto_remote_handoff = true
 ```
 
-Before parking, Herdr transactionally writes one private recovery ticket per pane, including its exact workspace, tab, pane, and layout position. Session restore recreates that slot as a non-interactive restoring panel rather than a shell. A successful claim replaces the panel in place; it never falls back to the active tab.
+Before parking, Herdr transactionally writes one private recovery ticket per pane, including its exact workspace, tab, pane, and layout position. Session restore recreates that slot as a non-interactive restoring panel rather than a shell. A successful claim replaces the panel in place; it never falls back to the active tab. Existing tickets are always reconciled on startup, even when `auto_remote_handoff` has since been disabled; the setting controls only whether a later graceful stop creates new tickets.
 
 Each terminal restores independently. Herdr retries with bounded backoff for 120 seconds from that terminal's admitted attempt. A failure then changes only that panel to **Timed out**, sends one notification, and waits for Retry or the next startup. Closing the panel discards its local ticket; if the remote host cannot confirm termination, the still-hidden terminal becomes a discoverable orphan. `remote-resume` lists or retries tickets without changing unrelated timers:
 
@@ -266,7 +266,7 @@ herdr remote-resume --peer workbox
 herdr remote-resume --list     # show pending panes without resuming
 ```
 
-When a later managed SSH connection finds parked terminals whose local tickets were discarded, or when a client attaches to the owning remote server, Herdr opens an orphan review. **Retain** keeps a terminal hidden and reminds again on the next qualifying connection, **Terminate** stops it, and **Promote** makes it visible in the session showing the review. `herdr terminal parked list|promote|terminate` provides the same remote-host administration. A remote machine or server stop destroys its PTYs; after it returns Herdr reports those tickets as ended rather than inventing replacement shells.
+When a later managed SSH connection finds parked terminals whose local tickets were discarded, or when a client attaches to the owning remote server, Herdr opens an orphan review. **Retain** keeps a terminal hidden and reminds again on the next qualifying connection, **Terminate** stops it, and **Promote** makes it visible in the session showing the review. `herdr terminal parked list|promote|terminate` provides the same remote-host administration. A remote machine or server stop destroys its PTYs. After the authenticated host confirms that a parked terminal is gone, Herdr removes that recovery ticket, reports the end once, and repairs the reserved slot with a local shell. Transport, authentication, and malformed-response failures do not remove tickets and remain independently retryable.
 
 Normal `session delete` refuses sessions with recovery tickets. `session delete --force` discards them and reports the possible orphan count. This feature upgrades graceful local stops only; a local crash cannot run the parking transaction.
 

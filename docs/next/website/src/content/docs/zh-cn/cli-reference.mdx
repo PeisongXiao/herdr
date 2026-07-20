@@ -301,7 +301,7 @@ herdr remote-resume [--list] [--peer PEER_ID]
 
 peer 是由 Herdr 窗格内的 `ssh TARGET` 或 `agent start --ssh` 建立的运行时链接。`peer list` 显示生成的 id,`peer health` 刷新可达性,`peer unregister` 移除该 peer 的全部托管桥。普通 SSH bridge 随前台 attach 关闭,wrapper 每三秒续租一次 15 秒 lease,因此 wrapper 崩溃也会自动回收。peer 不是持久配对;服务器重启后必须重新连接。活动或准备中的展示、peer 链接或后台清理会阻止服务器 live handoff。
 
-`herdr remote-resume` 用于重试取回上一次正常停止时通过 `[remote] auto_remote_handoff` 交还给主机的远程窗格。服务器启动时的自动取回是非交互式的,因此需要密码或 MFA 的主机窗格会保持 pending;`remote-resume` 会像普通 `ssh` 登录一样在前台完成认证并取回。`--list` 只显示 pending 窗格及其最近的错误,`--peer` 将重试限制在单个 peer。
+`herdr remote-resume` 是为上一次正常停止时通过 `[remote] auto_remote_handoff` 交还给主机的远程窗格提供的交互认证与重试 fallback。无论当前设置值如何,已有 ticket 都会在服务器启动时自动尝试恢复。自动取回是非交互式的,因此需要密码或 MFA 的主机窗格会保持 pending;`remote-resume` 会像普通 `ssh` 登录一样在前台完成认证并取回。`--list` 只显示 pending 窗格及其最近的错误,`--peer` 将重试限制在单个 peer。经 host 确认已经结束的 terminal 会自动从 pending list 移除。
 
 ## 等待
 
